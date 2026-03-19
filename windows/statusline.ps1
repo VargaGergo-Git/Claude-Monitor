@@ -5,7 +5,7 @@
 # "statusLine": { "type": "command", "command": "powershell -ExecutionPolicy Bypass -File %USERPROFILE%\\.claude\\statusline.ps1", "padding": 4 }
 $ErrorActionPreference = "SilentlyContinue"
 
-$InputData = $input | Out-String
+$InputData = [Console]::In.ReadToEnd()
 $json = $InputData | ConvertFrom-Json
 if (-not $json) { exit }
 

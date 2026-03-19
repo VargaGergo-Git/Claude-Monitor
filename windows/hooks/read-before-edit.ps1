@@ -2,8 +2,8 @@
 # Hook type: PreToolUse (matcher: Edit|Write)
 # PowerShell version for native Windows Claude Code
 
-$Input = $input | Out-String
-$json = $Input | ConvertFrom-Json -ErrorAction SilentlyContinue
+$InputData = [Console]::In.ReadToEnd()
+$json = $InputData | ConvertFrom-Json -ErrorAction SilentlyContinue
 if (-not $json) { exit }
 
 $tool = $json.tool_name

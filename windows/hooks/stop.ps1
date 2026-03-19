@@ -2,8 +2,8 @@
 # Hook type: Stop
 # PowerShell version for native Windows Claude Code
 
-$Input = $input | Out-String
-$json = $Input | ConvertFrom-Json -ErrorAction SilentlyContinue
+$InputData = [Console]::In.ReadToEnd()
+$json = $InputData | ConvertFrom-Json -ErrorAction SilentlyContinue
 if (-not $json) { exit }
 
 $Dir = $json.cwd
@@ -19,7 +19,7 @@ if ($SessionId -and (Test-Path $sessionsFile)) {
         $sessions | ForEach-Object {
             if ($_.id -eq $SessionId) { $_.lastActive = $now }
         }
-        $sessions | ConvertTo-Json -AsArray | Set-Content $sessionsFile
+        ConvertTo-Json @($sessions) -Depth 3 | Set-Content $sessionsFile
     } catch {}
 }
 

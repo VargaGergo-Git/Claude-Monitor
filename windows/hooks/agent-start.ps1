@@ -2,8 +2,8 @@
 # Hook type: SubagentStart
 # PowerShell version for native Windows Claude Code
 
-$Input = $input | Out-String
-$json = $Input | ConvertFrom-Json -ErrorAction SilentlyContinue
+$InputData = [Console]::In.ReadToEnd()
+$json = $InputData | ConvertFrom-Json -ErrorAction SilentlyContinue
 if (-not $json) { exit }
 
 $claudeDir = Join-Path $env:USERPROFILE ".claude"
@@ -33,6 +33,6 @@ if ($sessionId -and (Test-Path $sessionsFile)) {
         $sessions | ForEach-Object {
             if ($_.id -eq $sessionId) { $_.agents = $newCount; $_.status = "active" }
         }
-        $sessions | ConvertTo-Json -AsArray | Set-Content $sessionsFile
+        ConvertTo-Json @($sessions) -Depth 3 | Set-Content $sessionsFile
     } catch {}
 }

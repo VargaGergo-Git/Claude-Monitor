@@ -1,4 +1,4 @@
-# Claude Monitor — One-command setup for Windows
+# Claude Monitor -- One-command setup for Windows
 # Usage: irm https://raw.githubusercontent.com/VargaGergo-Git/Claude-Monitor/main/setup.ps1 | iex
 $ErrorActionPreference = "Stop"
 
@@ -8,7 +8,7 @@ function Write-Err($msg)   { Write-Host "[X] " -ForegroundColor Red -NoNewline; 
 
 Write-Host ""
 Write-Host "Claude Monitor" -ForegroundColor White -NoNewline
-Write-Host " — One-command setup" -ForegroundColor Gray
+Write-Host " -- One-command setup" -ForegroundColor Gray
 Write-Host ""
 
 # Prerequisites
@@ -17,8 +17,8 @@ if (-not (Get-Command "git" -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-# Clone to temp directory
-$TmpDir = Join-Path $env:TEMP "claude-monitor-setup-$(Get-Random)"
+# Clone to temp directory (use user profile to avoid short-path issues with Unicode names)
+$TmpDir = Join-Path $env:USERPROFILE ".claude-monitor-setup-$(Get-Random)"
 try {
     Write-Info "Downloading Claude Monitor..."
     git clone --depth 1 --quiet https://github.com/VargaGergo-Git/Claude-Monitor.git $TmpDir 2>$null
@@ -29,10 +29,12 @@ try {
     & powershell -ExecutionPolicy Bypass -File $installer
 
     Write-Host ""
-    Write-Ok "Setup complete — Claude Monitor is ready"
+    Write-Ok "Setup complete -- Claude Monitor is ready"
 } finally {
-    # Cleanup
-    if (Test-Path $TmpDir) {
-        Remove-Item $TmpDir -Recurse -Force -ErrorAction SilentlyContinue
-    }
+    # Cleanup temp directory
+    try {
+        if (Test-Path $TmpDir) {
+            Remove-Item $TmpDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    } catch {}
 }

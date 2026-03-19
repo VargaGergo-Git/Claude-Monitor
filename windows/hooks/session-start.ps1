@@ -2,8 +2,8 @@
 # Hook type: SessionStart
 # PowerShell version for native Windows Claude Code
 
-$Input = $input | Out-String
-$json = $Input | ConvertFrom-Json -ErrorAction SilentlyContinue
+$InputData = [Console]::In.ReadToEnd()
+$json = $InputData | ConvertFrom-Json -ErrorAction SilentlyContinue
 if (-not $json) { exit }
 
 $Dir = $json.cwd
@@ -53,7 +53,7 @@ if ($SessionId) {
             agents = 0
         }
 
-        $sessions | ConvertTo-Json -AsArray | Set-Content $sessionsFile
+        ConvertTo-Json @($sessions) -Depth 3 | Set-Content $sessionsFile
     } catch {}
 }
 
