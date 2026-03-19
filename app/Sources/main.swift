@@ -1,6 +1,5 @@
 import AppKit
 import Foundation
-import UserNotifications
 
 struct Session {
     var pid, project, branch, dir, duration, tty, lastCommit, context, name, sid: String
@@ -48,7 +47,8 @@ class VelocityTracker {
 
 // MARK: - Monitor
 
-class Monitor: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
+@available(macOS, deprecated: 11.0)
+class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate {
 
     // MARK: - State
 
@@ -101,10 +101,9 @@ class Monitor: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate
         try? FileManager.default.createDirectory(atPath: "\(home)/.claude", withIntermediateDirectories: true)
         cleanupStaleFiles(); loadNameCache()
         velocityTracker = VelocityTracker(home: home)
-        let nc = UNUserNotificationCenter.current(); nc.delegate = self
-        nc.requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
+        NSUserNotificationCenter.default.delegate = self
         scan(); build()
-        Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.build() }
+        Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.pickupHookNotifications(); self?.build() }
         Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in self?.scan(); self?.build() }
         Timer.scheduledTimer(withTimeInterval: 45, repeats: true) { [weak self] _ in guard self?.enableHaiku == true else { return }; self?.resolveSmartContexts() }
     }
@@ -276,19 +275,24 @@ class Monitor: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate
     }
 
     private func sendNotification(title: String, body: String, playSound: Bool = false, tty: String = "") {
-        let content = UNMutableNotificationContent()
-        content.title = title; content.body = body
-        if playSound && notifySound { content.sound = .default }
-        content.userInfo = ["tty": tty]
-        let req = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(req)
+        let n = NSUserNotification(); n.title = title; n.informativeText = body
+        if playSound && notifySound { n.soundName = NSUserNotificationDefaultSoundName }
+        n.userInfo = ["tty": tty]
+        NSUserNotificationCenter.default.deliver(n)
     }
-    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
-        if let tty = response.notification.request.content.userInfo["tty"] as? String, !tty.isEmpty { jumpToSession(tty) }
-        completionHandler()
+    func userNotificationCenter(_ center: NSUserNotificationCenter, didActivate notification: NSUserNotification) {
+        guard let tty = notification.userInfo?["tty"] as? String, !tty.isEmpty else { return }
+        DispatchQueue.global(qos: .userInteractive).async { [weak self] in self?.jumpToSession(tty) }
     }
-    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        completionHandler([.banner, .sound])
+    func userNotificationCenter(_ center: NSUserNotificationCenter, shouldPresent notification: NSUserNotification) -> Bool { true }
+
+    private func pickupHookNotifications() {
+        let path = "\(home)/.claude/.notify_pending"
+        guard let raw = try? String(contentsOfFile: path, encoding: .utf8), !raw.isEmpty else { return }
+        try? FileManager.default.removeItem(atPath: path)
+        let parts = raw.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "|", maxSplits: 1)
+        if parts.count == 2 { sendNotification(title: String(parts[0]), body: String(parts[1]), playSound: true) }
+        else { sendNotification(title: "Claude Code", body: raw.trimmingCharacters(in: .whitespacesAndNewlines), playSound: true) }
     }
 
     // MARK: - Haiku
