@@ -260,17 +260,22 @@ function Install-App {
     Copy-Item $src $dst -Force
     Write-Ok "Tray app installed to $dst"
 
-    # Create a launcher batch file for easy startup
+    # Generate EncodedCommand that resolves path via $env:USERPROFILE
+    # (avoids Unicode username corruption through cmd.exe / argument passing)
+    $launchScript = '& (Join-Path $env:USERPROFILE ".claude\tray-app.ps1")'
+    $encodedLaunch = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($launchScript))
+
+    # Create a launcher batch file for easy startup / login
     $launcher = Join-Path $ClaudeDir "ClaudeMonitor.bat"
     @"
 @echo off
-start /min powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File "%USERPROFILE%\.claude\tray-app.ps1"
+start /min powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand $encodedLaunch
 "@ | Set-Content $launcher
 
     Write-Ok "Launcher created: $launcher"
 
-    # Launch ONE instance
-    Start-Process -FilePath "powershell.exe" -ArgumentList "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$dst`"" -WindowStyle Hidden
+    # Launch ONE instance using EncodedCommand (Unicode-safe)
+    Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand $encodedLaunch" -WindowStyle Hidden
     Write-Ok "Claude Monitor is running in your system tray"
 }
 
