@@ -280,15 +280,29 @@ function Install-App {
     }
 
     Write-Info "Compiling tray app..."
+
+    # Copy source to temp path without Unicode chars (csc.exe + PS splatting
+    # can fail when the source path contains chars like ő)
+    $tmpCs = Join-Path $env:TEMP "ClaudeMonitorTray_build.cs"
+    Copy-Item $csSrc $tmpCs -Force
+
     $refs = @(
         "/r:System.Windows.Forms.dll",
         "/r:System.Drawing.dll",
         "/r:System.Web.Extensions.dll"
     )
-    $compileArgs = @("/nologo", "/target:winexe", "/optimize+", "/out:$exeDst") + $refs + @($csSrc)
-    $result = & $csc @compileArgs 2>&1
+    $compileArgs = @("/nologo", "/target:winexe", "/optimize+", "/out:$exeDst") + $refs + @($tmpCs)
 
-    if ($LASTEXITCODE -ne 0) {
+    # Temporarily lower error preference so csc warnings don't abort
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $result = & $csc @compileArgs 2>&1
+    $compileExit = $LASTEXITCODE
+    $ErrorActionPreference = $prevEAP
+
+    Remove-Item $tmpCs -Force -ErrorAction SilentlyContinue
+
+    if ($compileExit -ne 0) {
         Write-Err "Compilation failed:"
         $result | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
         # Fall back to PowerShell version
