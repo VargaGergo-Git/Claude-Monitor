@@ -77,395 +77,6 @@ class VelocityTracker {
     }
 }
 
-// MARK: - Overlay Panel
-
-class OverlayPanel: NSPanel {
-    init() {
-        super.init(contentRect: NSRect(x: 0, y: 0, width: 340, height: 48),
-                   styleMask: [.nonactivatingPanel, .fullSizeContentView],
-                   backing: .buffered, defer: true)
-        self.level = .floating
-        self.isOpaque = false
-        self.backgroundColor = .clear
-        self.hasShadow = true
-        self.isMovableByWindowBackground = true
-        self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        self.hidesOnDeactivate = false
-        self.titleVisibility = .hidden
-        self.titlebarAppearsTransparent = true
-        let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        self.setFrameOrigin(NSPoint(x: screen.maxX - 356, y: screen.maxY - 64))
-    }
-}
-
-class OverlayView: NSView {
-    var sessions: [Session] = []
-    var sessPct = 0, weekPct = 0, opusPct = 0, sonnetPct = 0
-    var sessReset = "", weekReset = "", weeklyDelta = ""
-    var velocityStr = ""
-    var etaStr = ""
-    var conflicts: [String] = []
-    var compact = false
-    var cardRects: [NSRect] = []
-    var hoverIndex = -1
-    var closeHover = false
-    var compactAllHover = false
-    var exportHover = false
-    var trackingArea: NSTrackingArea?
-    var compactAllRect = NSRect.zero
-    var exportRect = NSRect.zero
-
-    var onSessionClick: ((Session) -> Void)?
-    var onClose: (() -> Void)?
-    var onToggleCompact: (() -> Void)?
-    var onCompactAll: (() -> Void)?
-    var onExport: (() -> Void)?
-
-    override var isFlipped: Bool { true }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let ta = trackingArea { removeTrackingArea(ta) }
-        trackingArea = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways], owner: self, userInfo: nil)
-        addTrackingArea(trackingArea!)
-    }
-
-    func recalcHeight() {
-        if compact {
-            frame.size = NSSize(width: 340, height: 52)
-        } else {
-            var h: CGFloat = 38 // header
-            h += CGFloat(sessions.count) * 58 // cards
-            if !conflicts.isEmpty { h += 22 } // conflict warning
-            h += 52 // usage section (session + weekly + model breakdown)
-            if !velocityStr.isEmpty { h += 16 } // velocity line
-            h += 34 // action buttons
-            h += 8  // bottom pad
-            frame.size = NSSize(width: 340, height: min(max(h, 52), 500))
-        }
-        window?.setContentSize(frame.size)
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        let w = bounds.width
-        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 14, yRadius: 14)
-
-        // Background gradient
-        NSColor(white: 0.05, alpha: 0.90).setFill()
-        path.fill()
-
-        // Subtle top highlight
-        let topLine = NSBezierPath()
-        topLine.move(to: NSPoint(x: 20, y: 1))
-        topLine.line(to: NSPoint(x: w - 20, y: 1))
-        NSColor(white: 0.3, alpha: 0.3).setStroke()
-        topLine.lineWidth = 0.5
-        topLine.stroke()
-
-        // Border
-        NSColor(white: 0.18, alpha: 0.5).setStroke()
-        path.lineWidth = 0.5
-        path.stroke()
-
-        // Close button
-        let closeRect = NSRect(x: w - 28, y: 8, width: 18, height: 18)
-        let closeFg: NSColor = closeHover ? NSColor(red: 0.9, green: 0.25, blue: 0.2, alpha: 1) : NSColor(white: 0.3, alpha: 1)
-        draw("\u{00D7}", at: NSPoint(x: closeRect.minX + 4, y: closeRect.minY + 1), font: .systemFont(ofSize: 12, weight: .bold), color: closeFg)
-
-        var y: CGFloat = 0
-
-        // == HEADER ==
-        let anyActive = sessions.contains { $0.state == "active" }
-        let anyWaiting = sessions.contains { $0.state == "waiting" }
-        let diamondColor: NSColor = anyActive ? NSColor(red: 0.3, green: 0.78, blue: 0.5, alpha: 1) :
-            anyWaiting ? NSColor(red: 0.9, green: 0.7, blue: 0.15, alpha: 1) :
-            NSColor(white: 0.35, alpha: 1)
-
-        // Diamond
-        let dp = NSBezierPath()
-        dp.move(to: NSPoint(x: 16, y: y + 10)); dp.line(to: NSPoint(x: 22, y: y + 19))
-        dp.line(to: NSPoint(x: 16, y: y + 28)); dp.line(to: NSPoint(x: 10, y: y + 19)); dp.close()
-        diamondColor.setFill(); dp.fill()
-        // Diamond glow
-        diamondColor.withAlphaComponent(0.15).setFill()
-        let glowDp = NSBezierPath()
-        glowDp.move(to: NSPoint(x: 16, y: y + 7)); glowDp.line(to: NSPoint(x: 25, y: y + 19))
-        glowDp.line(to: NSPoint(x: 16, y: y + 31)); glowDp.line(to: NSPoint(x: 7, y: y + 19)); glowDp.close()
-        glowDp.fill()
-
-        let headerText = sessions.isEmpty ? "Claude Monitor" : "\(sessions.count) session\(sessions.count != 1 ? "s" : "")"
-        let headerPt = NSPoint(x: 30, y: y + 10)
-        draw(headerText, at: headerPt, font: .systemFont(ofSize: 13, weight: .bold), color: NSColor(white: 0.88, alpha: 1))
-
-        // Total agents
-        let totalAgents = sessions.reduce(0) { $0 + $1.agentCount }
-        if totalAgents > 0 {
-            let agentStr = "+\(totalAgents) agent\(totalAgents != 1 ? "s" : "")"
-            let headerWidth = (headerText as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 13, weight: .bold)]).width
-            draw(agentStr, at: NSPoint(x: 30 + headerWidth + 8, y: y + 12), font: .monospacedSystemFont(ofSize: 9, weight: .medium), color: NSColor(red: 0.55, green: 0.7, blue: 0.9, alpha: 1))
-        }
-
-        // State dots
-        if !sessions.isEmpty {
-            var dotX: CGFloat = w - 36 - CGFloat(sessions.count) * 12
-            for s in sessions {
-                let dc: NSColor = s.state == "active" ? NSColor(red: 0.3, green: 0.78, blue: 0.5, alpha: 1) :
-                    s.state == "waiting" ? NSColor(red: 0.9, green: 0.7, blue: 0.15, alpha: 1) :
-                    NSColor(white: 0.2, alpha: 1)
-                dc.setFill()
-                NSBezierPath(ovalIn: NSRect(x: dotX, y: y + 15, width: 7, height: 7)).fill()
-                dotX += 12
-            }
-        }
-        y += 38
-
-        if compact {
-            if sessPct > 0 || weekPct > 0 {
-                let cl = "S:\(sessPct)%  W:\(weekPct)%"
-                draw(cl, at: NSPoint(x: 30, y: y - 6), font: .monospacedSystemFont(ofSize: 10, weight: .medium), color: barColor(sessPct))
-                if !etaStr.isEmpty {
-                    let clWidth = (cl as NSString).size(withAttributes: [.font: NSFont.monospacedSystemFont(ofSize: 10, weight: .medium)]).width
-                    draw(etaStr, at: NSPoint(x: 30 + clWidth + 10, y: y - 6), font: .systemFont(ofSize: 9, weight: .medium), color: NSColor(white: 0.4, alpha: 1))
-                }
-            }
-            return
-        }
-
-        // == CONFLICT WARNING ==
-        if !conflicts.isEmpty {
-            let warnRect = NSRect(x: 8, y: y, width: w - 16, height: 18)
-            NSColor(red: 0.4, green: 0.15, blue: 0.1, alpha: 0.4).setFill()
-            NSBezierPath(roundedRect: warnRect, xRadius: 4, yRadius: 4).fill()
-            let conflictStr = "\u{26A0} File conflict: \(conflicts.first ?? "")\(conflicts.count > 1 ? " +\(conflicts.count - 1) more" : "")"
-            draw(conflictStr, at: NSPoint(x: 14, y: y + 2), font: .systemFont(ofSize: 9, weight: .bold), color: NSColor(red: 1, green: 0.7, blue: 0.3, alpha: 1))
-            y += 22
-        }
-
-        // == SESSION CARDS ==
-        cardRects = []
-        for (i, s) in sessions.enumerated() {
-            let cardRect = NSRect(x: 6, y: y, width: w - 12, height: 56)
-            cardRects.append(cardRect)
-
-            let isHover = hoverIndex == i
-            let cardBg: NSColor = isHover ? NSColor(white: 0.12, alpha: 0.8) : NSColor(white: 0.07, alpha: 0.5)
-            let cardPath = NSBezierPath(roundedRect: cardRect, xRadius: 8, yRadius: 8)
-            cardBg.setFill(); cardPath.fill()
-
-            // Hover border
-            if isHover {
-                NSColor(white: 0.25, alpha: 0.5).setStroke()
-                cardPath.lineWidth = 0.5; cardPath.stroke()
-            }
-
-            let cx = cardRect.minX + 10, cy = cardRect.minY + 5
-
-            // State dot with glow
-            let dotColor: NSColor = s.state == "active" ? NSColor(red: 0.3, green: 0.78, blue: 0.5, alpha: 1) :
-                s.state == "waiting" ? NSColor(red: 0.9, green: 0.7, blue: 0.15, alpha: 1) :
-                NSColor(white: 0.2, alpha: 1)
-            if s.state == "active" || s.state == "waiting" {
-                dotColor.withAlphaComponent(0.2).setFill()
-                NSBezierPath(ovalIn: NSRect(x: cx - 2, y: cy + 1, width: 12, height: 12)).fill()
-            }
-            dotColor.setFill()
-            NSBezierPath(ovalIn: NSRect(x: cx, y: cy + 3, width: 8, height: 8)).fill()
-
-            // Name
-            let name = s.name.isEmpty ? "Session" : (s.name.count > 24 ? String(s.name.prefix(21)) + "..." : s.name)
-            draw(name, at: NSPoint(x: cx + 14, y: cy), font: .systemFont(ofSize: 11, weight: .bold), color: .white)
-
-            // Agent badge (if agents running)
-            if s.agentCount > 0 {
-                let nameWidth = (name as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 11, weight: .bold)]).width
-                let agentBadge = "+\(s.agentCount)"
-                let badgeX = cx + 14 + nameWidth + 4
-                NSColor(red: 0.2, green: 0.3, blue: 0.5, alpha: 0.6).setFill()
-                NSBezierPath(roundedRect: NSRect(x: badgeX, y: cy + 1, width: 20, height: 12), xRadius: 3, yRadius: 3).fill()
-                draw(agentBadge, at: NSPoint(x: badgeX + 3, y: cy + 1), font: .monospacedSystemFont(ofSize: 8, weight: .bold), color: NSColor(red: 0.55, green: 0.7, blue: 0.95, alpha: 1))
-            }
-
-            // Right: ctx% + duration
-            var rightParts: [String] = []
-            if s.contextPct > 0 { rightParts.append("ctx \(s.contextPct)%") }
-            if !s.duration.isEmpty { rightParts.append(s.duration) }
-            let rightStr = rightParts.joined(separator: " \u{00B7} ")
-            if !rightStr.isEmpty {
-                let rightSize = (rightStr as NSString).size(withAttributes: [.font: NSFont.monospacedSystemFont(ofSize: 9, weight: .medium)])
-                let ctxColor = s.contextPct >= 80 ? NSColor(red: 0.85, green: 0.25, blue: 0.2, alpha: 1) :
-                    s.contextPct >= 60 ? NSColor(red: 0.9, green: 0.55, blue: 0.15, alpha: 1) :
-                    NSColor(white: 0.4, alpha: 1)
-                draw(rightStr, at: NSPoint(x: cardRect.maxX - rightSize.width - 8, y: cy + 2), font: .monospacedSystemFont(ofSize: 9, weight: .medium), color: ctxColor)
-            }
-
-            // Smart context (line 2)
-            var ctxLine = s.smartContext.isEmpty ? s.context : s.smartContext
-            if ctxLine.isEmpty { ctxLine = s.state == "waiting" ? "Waiting for your input" : "Working..." }
-            if ctxLine.count > 42 { ctxLine = String(ctxLine.prefix(39)) + "..." }
-            let ctxColor: NSColor = s.smartContext.isEmpty ? NSColor(white: 0.35, alpha: 1) : NSColor(red: 0.5, green: 0.55, blue: 0.78, alpha: 1)
-            draw(ctxLine, at: NSPoint(x: cx + 14, y: cy + 17), font: .systemFont(ofSize: 10, weight: .medium), color: ctxColor)
-
-            // Agent description (line 2.5 — only if agents active)
-            if !s.agentDescs.isEmpty {
-                let agentLine = s.agentDescs.prefix(2).joined(separator: ", ")
-                let truncAgent = agentLine.count > 40 ? String(agentLine.prefix(37)) + "..." : agentLine
-                draw(truncAgent, at: NSPoint(x: cx + 14, y: cy + 30), font: .systemFont(ofSize: 8, weight: .medium), color: NSColor(red: 0.45, green: 0.55, blue: 0.8, alpha: 0.7))
-            }
-
-            // Mini progress bar
-            let barX = cx + 14, barY = cy + (s.agentDescs.isEmpty ? 34 : 42), barW: CGFloat = 90, barH: CGFloat = 3
-            NSColor(white: 0.12, alpha: 1).setFill()
-            NSBezierPath(roundedRect: NSRect(x: barX, y: barY, width: barW, height: barH), xRadius: 1.5, yRadius: 1.5).fill()
-            let fillW = barW * CGFloat(min(s.contextPct, 100)) / 100
-            if fillW > 0 {
-                barColor(s.contextPct).setFill()
-                NSBezierPath(roundedRect: NSRect(x: barX, y: barY, width: fillW, height: barH), xRadius: 1.5, yRadius: 1.5).fill()
-            }
-
-            // "click to jump" badge for all sessions
-            if isHover {
-                draw("click \u{2192} jump", at: NSPoint(x: cardRect.maxX - 62, y: barY - 1), font: .systemFont(ofSize: 7, weight: .bold), color: NSColor(white: 0.45, alpha: 0.8))
-            }
-
-            y += 58
-        }
-
-        // == USAGE SECTION ==
-        let uy = y + 4
-        if sessPct > 0 || weekPct > 0 {
-            drawUsageBar(label: "Session", pct: sessPct, reset: sessReset, delta: "", x: 10, y: uy)
-            drawUsageBar(label: "Weekly ", pct: weekPct, reset: weekReset, delta: weeklyDelta, x: 10, y: uy + 16)
-
-            // Model breakdown (compact)
-            var modelLine = ""
-            if opusPct > 0 { modelLine += "Opus \(opusPct)%" }
-            if sonnetPct > 0 { modelLine += modelLine.isEmpty ? "" : "  "; modelLine += "Sonnet \(sonnetPct)%" }
-            if !modelLine.isEmpty {
-                draw(modelLine, at: NSPoint(x: 10, y: uy + 32), font: .monospacedSystemFont(ofSize: 8, weight: .medium), color: NSColor(white: 0.3, alpha: 1))
-            }
-        } else {
-            draw("No usage data yet", at: NSPoint(x: 10, y: uy + 4), font: .systemFont(ofSize: 10, weight: .medium), color: NSColor(white: 0.2, alpha: 1))
-        }
-
-        // Velocity + ETA line
-        if !velocityStr.isEmpty {
-            let velY = uy + 46
-            draw(velocityStr, at: NSPoint(x: 10, y: velY), font: .systemFont(ofSize: 9, weight: .medium), color: NSColor(white: 0.38, alpha: 1))
-            if !etaStr.isEmpty {
-                let velWidth = (velocityStr as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 9, weight: .medium)]).width
-                let etaColor = etaStr.contains("< 1h") ? NSColor(red: 0.9, green: 0.3, blue: 0.2, alpha: 1) :
-                    etaStr.contains("< 2h") ? NSColor(red: 0.9, green: 0.6, blue: 0.15, alpha: 1) :
-                    NSColor(white: 0.38, alpha: 1)
-                draw(etaStr, at: NSPoint(x: 10 + velWidth + 8, y: velY), font: .systemFont(ofSize: 9, weight: .bold), color: etaColor)
-            }
-            y = velY + 16
-        } else {
-            y = uy + 52
-        }
-
-        // == ACTION BUTTONS ==
-        let actY = y + 2
-        NSColor(white: 0.15, alpha: 0.4).setStroke()
-        let sepLine = NSBezierPath()
-        sepLine.move(to: NSPoint(x: 10, y: actY)); sepLine.line(to: NSPoint(x: w - 10, y: actY))
-        sepLine.lineWidth = 0.5; sepLine.stroke()
-
-        let btnY = actY + 6
-        let btnH: CGFloat = 22
-        let hasWaiting = sessions.contains { $0.state == "waiting" }
-        let waitCount = sessions.filter { $0.state == "waiting" }.count
-
-        // Compact All button
-        let compactText = hasWaiting ? "/compact all (\(waitCount))" : "/compact all"
-        let compactW: CGFloat = 130
-        compactAllRect = NSRect(x: 10, y: btnY, width: compactW, height: btnH)
-        if compactAllHover && hasWaiting {
-            NSColor(white: 0.12, alpha: 0.8).setFill()
-            NSBezierPath(roundedRect: compactAllRect, xRadius: 6, yRadius: 6).fill()
-        }
-        draw(compactText, at: NSPoint(x: 16, y: btnY + 4), font: .systemFont(ofSize: 9, weight: .bold),
-             color: hasWaiting ? NSColor(red: 0.9, green: 0.7, blue: 0.15, alpha: 1) : NSColor(white: 0.18, alpha: 1))
-
-        // Export button
-        let exportText = "\u{2398} Export summary"
-        let exportW: CGFloat = 110
-        exportRect = NSRect(x: w - exportW - 10, y: btnY, width: exportW, height: btnH)
-        if exportHover {
-            NSColor(white: 0.12, alpha: 0.8).setFill()
-            NSBezierPath(roundedRect: exportRect, xRadius: 6, yRadius: 6).fill()
-        }
-        draw(exportText, at: NSPoint(x: w - exportW - 4, y: btnY + 4), font: .systemFont(ofSize: 9, weight: .bold), color: NSColor(red: 0.45, green: 0.6, blue: 0.8, alpha: 1))
-    }
-
-    func drawUsageBar(label: String, pct: Int, reset: String, delta: String, x: CGFloat, y: CGFloat) {
-        draw(label, at: NSPoint(x: x, y: y), font: .monospacedSystemFont(ofSize: 9, weight: .medium), color: NSColor(white: 0.32, alpha: 1))
-        let bx = x + 52, bw: CGFloat = 100, bh: CGFloat = 7
-        NSColor(white: 0.1, alpha: 1).setFill()
-        NSBezierPath(roundedRect: NSRect(x: bx, y: y + 3, width: bw, height: bh), xRadius: 3, yRadius: 3).fill()
-        let fw = bw * CGFloat(min(pct, 100)) / 100
-        if fw > 0 {
-            barColor(pct).setFill()
-            NSBezierPath(roundedRect: NSRect(x: bx, y: y + 3, width: fw, height: bh), xRadius: 3, yRadius: 3).fill()
-        }
-        var extra = "\(pct)%"
-        if !reset.isEmpty { extra += " \u{21BB}\(reset)" }
-        if !delta.isEmpty { extra += " \(delta)" }
-        draw(extra, at: NSPoint(x: bx + bw + 4, y: y + 1), font: .monospacedSystemFont(ofSize: 9, weight: .medium), color: barColor(pct))
-    }
-
-    func draw(_ text: String, at point: NSPoint, font: NSFont, color: NSColor) {
-        (text as NSString).draw(at: point, withAttributes: [.font: font, .foregroundColor: color])
-    }
-
-    func barColor(_ pct: Int) -> NSColor {
-        if pct >= 80 { return NSColor(red: 0.82, green: 0.27, blue: 0.23, alpha: 1) }
-        if pct >= 50 { return NSColor(red: 0.78, green: 0.63, blue: 0.15, alpha: 1) }
-        return NSColor(red: 0.22, green: 0.62, blue: 0.39, alpha: 1)
-    }
-
-    // -- Mouse --
-
-    override func mouseDown(with event: NSEvent) {
-        let loc = convert(event.locationInWindow, from: nil)
-        if NSRect(x: bounds.width - 28, y: 8, width: 18, height: 18).contains(loc) { onClose?(); return }
-        if event.clickCount == 2 && loc.y < 38 { onToggleCompact?(); return }
-        if !compact {
-            if compactAllRect.contains(loc) { onCompactAll?(); return }
-            if exportRect.contains(loc) { onExport?(); return }
-            for (i, rect) in cardRects.enumerated() where rect.contains(loc) {
-                if i < sessions.count { onSessionClick?(sessions[i]) }
-                return
-            }
-        }
-    }
-
-    override func mouseMoved(with event: NSEvent) {
-        let loc = convert(event.locationInWindow, from: nil)
-        var changed = false
-        let newClose = NSRect(x: bounds.width - 28, y: 8, width: 18, height: 18).contains(loc)
-        if newClose != closeHover { closeHover = newClose; changed = true }
-        var newHover = -1
-        if !compact { for (i, rect) in cardRects.enumerated() where rect.contains(loc) { newHover = i; break } }
-        if newHover != hoverIndex { hoverIndex = newHover; changed = true }
-        let newCompactAll = !compact && compactAllRect.contains(loc)
-        if newCompactAll != compactAllHover { compactAllHover = newCompactAll; changed = true }
-        let newExport = !compact && exportRect.contains(loc)
-        if newExport != exportHover { exportHover = newExport; changed = true }
-        if changed { needsDisplay = true }
-        NSCursor.pointingHand.set()
-        if newHover < 0 && !newClose && !newCompactAll && !newExport { NSCursor.arrow.set() }
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        var changed = false
-        if hoverIndex >= 0 { hoverIndex = -1; changed = true }
-        if closeHover { closeHover = false; changed = true }
-        if compactAllHover { compactAllHover = false; changed = true }
-        if exportHover { exportHover = false; changed = true }
-        if changed { NSCursor.arrow.set(); needsDisplay = true }
-    }
-}
-
 // MARK: - Monitor
 
 class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate {
@@ -480,18 +91,7 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
     private var prevStates: [String: String] = [:]
     private var ctxWarned = Set<String>()
 
-    private var overlayPanel: OverlayPanel!
-    private var overlayView: OverlayView!
     private var velocityTracker: VelocityTracker!
-
-    private var showOverlay: Bool {
-        get { ud.object(forKey: "showOverlay") as? Bool ?? true }
-        set { ud.set(newValue, forKey: "showOverlay") }
-    }
-    private var overlayCompact: Bool {
-        get { ud.object(forKey: "overlayCompact") as? Bool ?? false }
-        set { ud.set(newValue, forKey: "overlayCompact") }
-    }
 
     private let ud = UserDefaults.standard
     private var notifyWaiting: Bool { get { ud.object(forKey: "notifyWaiting") as? Bool ?? true } set { ud.set(newValue, forKey: "notifyWaiting") } }
@@ -520,20 +120,6 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
 
         // Notification click handler — jump to session terminal
         NSUserNotificationCenter.default.delegate = self
-
-        overlayPanel = OverlayPanel()
-        overlayView = OverlayView(frame: NSRect(x: 0, y: 0, width: 340, height: 48))
-        overlayView.compact = overlayCompact
-        overlayView.onSessionClick = { [weak self] s in self?.jumpToSession(s) }
-        overlayView.onClose = { [weak self] in self?.showOverlay = false; self?.overlayPanel.orderOut(nil) }
-        overlayView.onToggleCompact = { [weak self] in
-            guard let self else { return }
-            self.overlayCompact.toggle(); self.overlayView.compact = self.overlayCompact; self.updateOverlay()
-        }
-        overlayView.onCompactAll = { [weak self] in self?.compactAllWaiting() }
-        overlayView.onExport = { [weak self] in self?.exportSummary() }
-        overlayPanel.contentView = overlayView
-        if showOverlay { overlayPanel.orderFront(nil) }
 
         scan(); build()
         Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.build() }
@@ -634,63 +220,9 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
         return (count, descs)
     }
 
-    // MARK: - Overlay
-
     private var sessPct = 0, weekPct = 0
 
-    private func updateOverlay() {
-        guard showOverlay else { overlayPanel.orderOut(nil); return }
-
-        overlayView.sessions = sessions
-        overlayView.compact = overlayCompact
-
-        // Usage
-        if let data = FileManager.default.contents(atPath: "\(home)/.claude/.usage_cache.json"),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            let fh = json["five_hour"] as? [String: Any]; let sd = json["seven_day"] as? [String: Any]
-            sessPct = Int(fh?["utilization"] as? Double ?? 0)
-            weekPct = Int(sd?["utilization"] as? Double ?? 0)
-            overlayView.sessPct = sessPct
-            overlayView.weekPct = weekPct
-            overlayView.sessReset = fmtReset(fh?["resets_at"] as? String) ?? ""
-            overlayView.weekReset = fmtDay(sd?["resets_at"] as? String) ?? ""
-
-            // Per-model
-            if let opus = json["seven_day_opus"] as? [String: Any] {
-                overlayView.opusPct = Int(opus["utilization"] as? Double ?? 0)
-            }
-            if let sonnet = json["seven_day_sonnet"] as? [String: Any] {
-                overlayView.sonnetPct = Int(sonnet["utilization"] as? Double ?? 0)
-            }
-
-            // Velocity tracking
-            velocityTracker.record(pct: weekPct)
-            if let vel = velocityTracker.velocityPerHour(current: weekPct) {
-                overlayView.velocityStr = String(format: "%.1f%%/hr pace", vel)
-            } else { overlayView.velocityStr = "" }
-            if let eta = velocityTracker.etaMinutes(current: weekPct, target: 80) {
-                if eta < 60 { overlayView.etaStr = "80% in < 1h \u{26A0}" }
-                else { overlayView.etaStr = "80% in ~\(eta/60)h\(eta%60)m" }
-            } else { overlayView.etaStr = weekPct >= 80 ? "over 80% \u{26A0}" : "" }
-        }
-
-        // Weekly delta
-        let startPath = "\(home)/.claude/.weekly_start_pct"
-        if let startStr = try? String(contentsOfFile: startPath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
-           let startPct = Int(startStr) {
-            let delta = weekPct - startPct
-            overlayView.weeklyDelta = delta > 0 ? "+\(delta)%" : ""
-        }
-
-        // Conflicts
-        overlayView.conflicts = detectConflicts()
-
-        overlayView.recalcHeight()
-        overlayView.needsDisplay = true
-        if !overlayPanel.isVisible { overlayPanel.orderFront(nil) }
-    }
-
-    // MARK: - Cleanup + Notifications + Name Cache (unchanged)
+    // MARK: - Cleanup + Notifications + Name Cache
 
     private func cleanupStaleFiles() {
         let fm = FileManager.default; let cd = "\(home)/.claude"
@@ -943,7 +475,7 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
 
         guard !sessions.isEmpty else {
             txt("  No active sessions", sz: 13, wt: .medium, cl: .white, menu: menu)
-            footer(menu); statusItem.menu = menu; updateOverlay(); return
+            footer(menu); statusItem.menu = menu; return
         }
 
         let byDir = Dictionary(grouping: sessions, by: \.dir)
@@ -973,8 +505,7 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
             menu.addItem(NSMenuItem.separator())
         }
 
-        usage(menu); footer(menu); statusItem.menu = menu; updateOverlay()
-    }
+        usage(menu); footer(menu); statusItem.menu = menu    }
 
     private func sessionRow(_ s: Session, menu: NSMenu) {
         let dn = s.name.isEmpty ? (pendingNames.contains(s.sid) ? "Naming..." : "Session") : s.name
@@ -1099,9 +630,6 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
         addToggle(sm, "Notification Sounds", notifySound, #selector(toggleSound))
         addToggle(sm, "AI Names + Smart Context", enableHaiku, #selector(toggleHaiku))
         sm.addItem(NSMenuItem.separator())
-        addToggle(sm, "Show Overlay Widget", showOverlay, #selector(toggleOverlay))
-        addToggle(sm, "Compact Overlay", overlayCompact, #selector(toggleCompactOverlay))
-        sm.addItem(NSMenuItem.separator())
         let isInstalled = FileManager.default.fileExists(atPath: "\(home)/Library/LaunchAgents/com.claude.monitor.plist")
         addToggle(sm, "Launch at Login", isInstalled, #selector(toggleAutoLaunch))
         let si = NSMenuItem(title: "Settings", action: nil, keyEquivalent: ""); si.submenu = sm; menu.addItem(si)
@@ -1119,8 +647,6 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
     @objc private func toggleContext() { notifyContext.toggle(); build() }
     @objc private func toggleSound() { notifySound.toggle(); build() }
     @objc private func toggleHaiku() { enableHaiku.toggle(); build() }
-    @objc private func toggleOverlay() { showOverlay.toggle(); updateOverlay(); build() }
-    @objc private func toggleCompactOverlay() { overlayCompact.toggle(); overlayView.compact = overlayCompact; updateOverlay(); build() }
 
     @objc private func toggleAutoLaunch() {
         let pp = "\(home)/Library/LaunchAgents/com.claude.monitor.plist"; let fm = FileManager.default
