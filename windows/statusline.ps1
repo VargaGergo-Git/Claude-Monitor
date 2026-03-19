@@ -9,13 +9,18 @@ $InputData = $input | Out-String
 $json = $InputData | ConvertFrom-Json
 if (-not $json) { exit }
 
+# ── ESC character (works in PowerShell 5.1+) ────────────────
+$e = [char]27
+
 # ── Parse ───────────────────────────────────────────────────
 $Model = if ($json.model.display_name) { $json.model.display_name } else { "Claude" }
 $SettingsPath = Join-Path $env:USERPROFILE ".claude\settings.json"
 $Effort = "default"
+$Fast = $false
 if (Test-Path $SettingsPath) {
     $settings = Get-Content $SettingsPath -Raw | ConvertFrom-Json
     if ($settings.effortLevel) { $Effort = $settings.effortLevel }
+    if ($settings.fastMode -eq $true) { $Fast = $true }
 }
 $Pct = [int]($json.context_window.used_percentage -replace '\..*', '')
 $Dir = $json.workspace.current_dir
@@ -39,13 +44,12 @@ if (Test-Path $Cache) {
 }
 
 if ($CacheAge -ge 300) {
-    # Try to get OAuth token from Windows Credential Manager
     $Token = ""
     try {
         Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
-public class WinCred {
+public class WinCredSL {
     [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
     public static extern bool CredRead(string target, int type, int reserved, out IntPtr cred);
     [DllImport("advapi32.dll")]
@@ -72,7 +76,7 @@ public class WinCred {
 }
 "@ -ErrorAction SilentlyContinue
 
-        $credJson = [WinCred]::GetPassword("Claude Code-credentials")
+        $credJson = [WinCredSL]::GetPassword("Claude Code-credentials")
         if ($credJson) {
             $credObj = $credJson | ConvertFrom-Json
             $Token = $credObj.claudeAiOauth.accessToken
@@ -88,7 +92,6 @@ public class WinCred {
             $resp = Invoke-RestMethod -Uri "https://api.anthropic.com/api/oauth/usage" -Headers $headers -TimeoutSec 3
             $resp | ConvertTo-Json -Depth 5 | Set-Content $Cache
         } catch {
-            # Touch cache to prevent retry spam
             if (Test-Path $Cache) { (Get-Item $Cache).LastWriteTime = Get-Date }
         }
     }
@@ -129,31 +132,31 @@ if (Test-Path $Cache) {
     }
 }
 
-# ── ANSI Palette ────────────────────────────────────────────
-$R = "`e[0m"; $B = "`e[1m"
-$FG_BRAND = "`e[38;2;255;150;70m"
-$FG_MODEL = "`e[38;2;200;195;185m"
-$FG_PROJ  = "`e[38;2;235;235;248m"
-$FG_GIT   = "`e[38;2;100;220;195m"
-$FG_DIRTY = "`e[38;2;255;190;70m"
-$FG_OK    = "`e[38;2;120;220;155m"
-$FG_MID   = "`e[38;2;245;195;75m"
-$FG_HOT   = "`e[38;2;245;115;100m"
-$FG_DIM   = "`e[38;2;80;80;105m"
-$FG_MUTED = "`e[38;2;42;42;55m"
-$FG_SESS  = "`e[38;2;175;145;240m"
-$FG_WEEK  = "`e[38;2;105;175;245m"
-$FG_SEP   = "`e[38;2;45;45;62m"
-$FG_CTX   = "`e[38;2;140;210;180m"
-$FG_EFF_LO  = "`e[38;2;90;200;160m"
-$FG_EFF_MED = "`e[38;2;220;195;90m"
-$FG_EFF_HI  = "`e[38;2;240;130;90m"
-$FG_FAST_ON  = "`e[38;2;255;150;70m"
-$FG_FAST_OFF = "`e[38;2;80;80;105m"
-$FG_AGENT = "`e[38;2;180;140;255m"
-$FG_AGENT_TASK = "`e[38;2;130;110;180m"
-$BG = "`e[48;2;18;18;26m"
-$SEP = "${FG_SEP} | ${R}${BG}"
+# ── ANSI Palette (using $e = [char]27 for PS 5.1 compat) ────
+$R = "$e[0m"; $B = "$e[1m"
+$FG_BRAND    = "$e[38;2;255;150;70m"
+$FG_MODEL    = "$e[38;2;200;195;185m"
+$FG_PROJ     = "$e[38;2;235;235;248m"
+$FG_GIT      = "$e[38;2;100;220;195m"
+$FG_DIRTY    = "$e[38;2;255;190;70m"
+$FG_OK       = "$e[38;2;120;220;155m"
+$FG_MID      = "$e[38;2;245;195;75m"
+$FG_HOT      = "$e[38;2;245;115;100m"
+$FG_DIM      = "$e[38;2;80;80;105m"
+$FG_MUTED    = "$e[38;2;42;42;55m"
+$FG_SESS     = "$e[38;2;175;145;240m"
+$FG_WEEK     = "$e[38;2;105;175;245m"
+$FG_SEP      = "$e[38;2;45;45;62m"
+$FG_CTX      = "$e[38;2;140;210;180m"
+$FG_EFF_LO   = "$e[38;2;90;200;160m"
+$FG_EFF_MED  = "$e[38;2;220;195;90m"
+$FG_EFF_HI   = "$e[38;2;240;130;90m"
+$FG_FAST_ON  = "$e[38;2;255;150;70m"
+$FG_FAST_OFF = "$e[38;2;80;80;105m"
+$FG_AGENT    = "$e[38;2;180;140;255m"
+$FG_AGDESC   = "$e[38;2;130;110;180m"
+$BG_BAR      = "$e[48;2;18;18;26m"
+$SEP = "${FG_SEP} | ${R}${BG_BAR}"
 
 # ── Helpers ─────────────────────────────────────────────────
 function Pick-UsageFg($p, $labelColor) {
@@ -165,8 +168,8 @@ function Pick-UsageFg($p, $labelColor) {
 function Make-Bar($p, $n, $fg) {
     $f = [int]($p * $n / 100)
     if ($f -gt $n) { $f = $n }
-    $filled = [string]::new([char]0x2501, $f)    # ━
-    $empty  = [string]::new([char]0x2500, $n - $f)  # ─
+    $filled = [string]::new([char]0x2501, $f)    # heavy horizontal ━
+    $empty  = [string]::new([char]0x2500, $n - $f)  # light horizontal ─
     return "${fg}${filled}${FG_MUTED}${empty}"
 }
 
@@ -178,51 +181,48 @@ switch ($Effort) {
     "medium"                 { $EffFg = $FG_EFF_MED; $EffLabel = "Medium" }
 }
 
-$Fast = $false
-if ($settings.fastMode -eq $true) { $Fast = $true }
-
 # ── Line 1: Project + Model + Git + Context ─────────────────
-$L1 = "${BG} "
-$L1 += "${FG_BRAND}${B}`u{25C6}${R}${BG} ${FG_PROJ}${B}${Proj}${R}${BG} ${FG_DIM}`u{00B7}${R}${BG} ${FG_MODEL}${Model}${R}${BG}"
+$L1 = "${BG_BAR} "
+$L1 += "${FG_BRAND}${B}$([char]0x25C6)${R}${BG_BAR} ${FG_PROJ}${B}${Proj}${R}${BG_BAR} ${FG_DIM}$([char]0xB7)${R}${BG_BAR} ${FG_MODEL}${Model}${R}${BG_BAR}"
 
 if ($Branch) {
-    $L1 += "${SEP}${FG_GIT}${Branch}${R}${BG}"
-    if ($Dirty -gt 0) { $L1 += " ${FG_DIRTY}`u{25CF}${R}${BG}" }
+    $L1 += "${SEP}${FG_GIT}${Branch}${R}${BG_BAR}"
+    if ($Dirty -gt 0) { $L1 += " ${FG_DIRTY}$([char]0x25CF)${R}${BG_BAR}" }
 }
 
 $ctxFg = Pick-UsageFg $Pct $FG_CTX
 $ctxBar = Make-Bar $Pct 20 $ctxFg
-$L1 += "${SEP}${FG_DIM}context${R}${BG} ${ctxBar}${R}${BG} ${ctxFg}${B}${Pct}%${R}${BG}"
+$L1 += "${SEP}${FG_DIM}context${R}${BG_BAR} ${ctxBar}${R}${BG_BAR} ${ctxFg}${B}${Pct}%${R}${BG_BAR}"
 
-if ($EffLabel) { $L1 += "${SEP}${EffFg}${EffLabel}${R}${BG}" }
+if ($EffLabel) { $L1 += "${SEP}${EffFg}${EffLabel}${R}${BG_BAR}" }
 
 if ($Fast) {
-    $L1 += "${SEP}${FG_FAST_ON}${B}`u{26A1}Fast${R}${BG}"
+    $L1 += "${SEP}${FG_FAST_ON}${B}$([char]0x26A1)Fast${R}${BG_BAR}"
 } else {
-    $L1 += "${SEP}${FG_FAST_OFF}`u{26A1}Off${R}${BG}"
+    $L1 += "${SEP}${FG_FAST_OFF}$([char]0x26A1)Off${R}${BG_BAR}"
 }
 $L1 += " ${R}"
 
 # ── Line 2: Session + Weekly usage ──────────────────────────
-$L2 = "${BG} "
+$L2 = "${BG_BAR} "
 
 $sessFg = Pick-UsageFg $SessionPct $FG_SESS
 $sessBar = Make-Bar $SessionPct 24 $sessFg
-$L2 += "${FG_SESS}Session${R}${BG} ${sessBar}${R}${BG} ${sessFg}${B}${SessionPct}%${R}${BG}"
-if ($SessReset) { $L2 += " ${FG_DIM}${SessReset}${R}${BG}" }
+$L2 += "${FG_SESS}Session${R}${BG_BAR} ${sessBar}${R}${BG_BAR} ${sessFg}${B}${SessionPct}%${R}${BG_BAR}"
+if ($SessReset) { $L2 += " ${FG_DIM}${SessReset}${R}${BG_BAR}" }
 
 $weekFg = Pick-UsageFg $WeeklyPct $FG_WEEK
 $weekBar = Make-Bar $WeeklyPct 24 $weekFg
-$L2 += "${SEP}${FG_WEEK}Weekly${R}${BG} ${weekBar}${R}${BG} ${weekFg}${B}${WeeklyPct}%${R}${BG}"
-if ($WeekDelta -gt 0) { $L2 += " ${FG_DIM}+${WeekDelta}%${R}${BG}" }
-if ($WeekReset) { $L2 += " ${FG_DIM}${WeekReset}${R}${BG}" }
+$L2 += "${SEP}${FG_WEEK}Weekly${R}${BG_BAR} ${weekBar}${R}${BG_BAR} ${weekFg}${B}${WeeklyPct}%${R}${BG_BAR}"
+if ($WeekDelta -gt 0) { $L2 += " ${FG_DIM}+${WeekDelta}%${R}${BG_BAR}" }
+if ($WeekReset) { $L2 += " ${FG_DIM}${WeekReset}${R}${BG_BAR}" }
 
 if (Test-Path $Cache) {
     $ago = ((Get-Date) - (Get-Item $Cache).LastWriteTime).TotalSeconds
     $refreshLabel = if ($ago -lt 60) { "just now" }
         elseif ($ago -lt 3600) { "$([int]($ago/60))m ago" }
         else { "$([int]($ago/3600))h ago" }
-    $L2 += " ${FG_DIM}`u{00B7} ${refreshLabel}${R}${BG}"
+    $L2 += " ${FG_DIM}$([char]0xB7) ${refreshLabel}${R}${BG_BAR}"
 }
 $L2 += " ${R}"
 
@@ -245,13 +245,15 @@ if ($AgentCount -gt 0) {
         }
     }
     $suffix = if ($AgentCount -gt 1) { "s" } else { "" }
-    $AgentLine = "${BG} ${FG_AGENT}${B}`u{25C6} $AgentCount agent${suffix}${R}${BG}"
-    if ($agentDescs) { $AgentLine += " ${FG_AGENT_TASK}${agentDescs}${R}${BG}" }
-    if ($SessionPct -gt 0) { $AgentLine += " ${FG_DIM}`u{00B7} session ${SessionPct}% used${R}${BG}" }
+    $AgentLine = "${BG_BAR} ${FG_AGENT}${B}$([char]0x25C6) $AgentCount agent${suffix}${R}${BG_BAR}"
+    if ($agentDescs) { $AgentLine += " ${FG_AGDESC}${agentDescs}${R}${BG_BAR}" }
+    if ($SessionPct -gt 0) { $AgentLine += " ${FG_DIM}$([char]0xB7) session ${SessionPct}% used${R}${BG_BAR}" }
     $AgentLine += " ${R}"
 }
 
-# ── Output ──────────────────────────────────────────────────
-Write-Host $L1
-Write-Host $L2
-if ($AgentLine) { Write-Host $AgentLine }
+# ── Output to STDOUT (not Write-Host!) ───────────────────────
+# Claude Code reads stdout from statusLine commands.
+# Write-Host goes to console directly and is invisible to Claude Code.
+[Console]::Out.WriteLine($L1)
+[Console]::Out.WriteLine($L2)
+if ($AgentLine) { [Console]::Out.WriteLine($AgentLine) }
