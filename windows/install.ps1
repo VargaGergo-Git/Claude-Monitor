@@ -106,6 +106,18 @@ function Install-Statusline {
     Write-Ok "Statusline installed"
 }
 
+# -- Resolve %USERPROFILE% in settings.json ---------------
+# cmd.exe can corrupt Unicode chars in paths when expanding %USERPROFILE%.
+# Bake the real path into settings.json so hooks are always found.
+function Resolve-SettingsPaths {
+    if (-not (Test-Path $Settings)) { return }
+    $content = Get-Content $Settings -Raw -ErrorAction SilentlyContinue
+    if (-not $content -or $content -notmatch '%USERPROFILE%') { return }
+    $resolved = $content.Replace('%USERPROFILE%', $env:USERPROFILE.Replace('\', '\\'))
+    Set-Content $Settings $resolved
+    Write-Ok "Resolved %USERPROFILE% to real path in settings.json"
+}
+
 # -- Configure settings.json ------------------------------
 function Configure-Settings {
     Write-Info "Configuring settings.json..."
@@ -123,6 +135,7 @@ function Configure-Settings {
         $template.PSObject.Properties.Remove('_comment')
         $template.PSObject.Properties.Remove('_instructions')
         $template | ConvertTo-Json -Depth 10 | Set-Content $Settings
+        Resolve-SettingsPaths
         Write-Ok "Created settings.json with hooks configuration"
         return
     }
@@ -140,6 +153,7 @@ function Configure-Settings {
         $template.PSObject.Properties.Remove('_comment')
         $template.PSObject.Properties.Remove('_instructions')
         $template | ConvertTo-Json -Depth 10 | Set-Content $Settings
+        Resolve-SettingsPaths
         Write-Ok "Created settings.json from template (previous file was empty/invalid)"
         return
     }
@@ -156,6 +170,9 @@ function Configure-Settings {
             $existing | ConvertTo-Json -Depth 10 | Set-Content $Settings
             Write-Ok "Added missing statusLine to settings.json (backup: $backup)"
         }
+
+        # Fix %USERPROFILE% in hook commands (Unicode username safety)
+        Resolve-SettingsPaths
         return
     }
 
@@ -172,6 +189,9 @@ function Configure-Settings {
 
     Write-Ok "Merged hooks + statusline into settings.json"
     Write-Ok "Backup saved to $backup"
+
+    # Fix %USERPROFILE% in hook commands (Unicode username safety)
+    Resolve-SettingsPaths
 }
 
 # -- Install tray app -------------------------------------
