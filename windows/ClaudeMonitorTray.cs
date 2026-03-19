@@ -321,19 +321,19 @@ class ClaudeMonitor : ApplicationContext {
             base.OnRenderItemText(e);
         }
         class DarkColors : ProfessionalColorTable {
-            public override Color MenuBorder => Color.FromArgb(50, 50, 65);
-            public override Color MenuItemBorder => Color.FromArgb(60, 60, 80);
-            public override Color MenuItemSelected => Color.FromArgb(50, 50, 70);
-            public override Color MenuItemSelectedGradientBegin => Color.FromArgb(50, 50, 70);
-            public override Color MenuItemSelectedGradientEnd => Color.FromArgb(50, 50, 70);
-            public override Color MenuStripGradientBegin => Color.FromArgb(30, 30, 42);
-            public override Color MenuStripGradientEnd => Color.FromArgb(30, 30, 42);
-            public override Color ToolStripDropDownBackground => Color.FromArgb(30, 30, 42);
-            public override Color ImageMarginGradientBegin => Color.FromArgb(30, 30, 42);
-            public override Color ImageMarginGradientMiddle => Color.FromArgb(30, 30, 42);
-            public override Color ImageMarginGradientEnd => Color.FromArgb(30, 30, 42);
-            public override Color SeparatorDark => Color.FromArgb(50, 50, 65);
-            public override Color SeparatorLight => Color.FromArgb(50, 50, 65);
+            public override Color MenuBorder { get { return Color.FromArgb(50, 50, 65); } }
+            public override Color MenuItemBorder { get { return Color.FromArgb(60, 60, 80); } }
+            public override Color MenuItemSelected { get { return Color.FromArgb(50, 50, 70); } }
+            public override Color MenuItemSelectedGradientBegin { get { return Color.FromArgb(50, 50, 70); } }
+            public override Color MenuItemSelectedGradientEnd { get { return Color.FromArgb(50, 50, 70); } }
+            public override Color MenuStripGradientBegin { get { return Color.FromArgb(30, 30, 42); } }
+            public override Color MenuStripGradientEnd { get { return Color.FromArgb(30, 30, 42); } }
+            public override Color ToolStripDropDownBackground { get { return Color.FromArgb(30, 30, 42); } }
+            public override Color ImageMarginGradientBegin { get { return Color.FromArgb(30, 30, 42); } }
+            public override Color ImageMarginGradientMiddle { get { return Color.FromArgb(30, 30, 42); } }
+            public override Color ImageMarginGradientEnd { get { return Color.FromArgb(30, 30, 42); } }
+            public override Color SeparatorDark { get { return Color.FromArgb(50, 50, 65); } }
+            public override Color SeparatorLight { get { return Color.FromArgb(50, 50, 65); } }
         }
     }
 }
