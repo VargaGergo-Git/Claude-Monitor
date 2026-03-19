@@ -34,6 +34,6 @@ if ($sessionId -and (Test-Path $sessionsFile)) {
         $sessions | ForEach-Object {
             if ($_.id -eq $sessionId) { $_.agents = $newCount; $_.status = "active" }
         }
-        ConvertTo-Json @($sessions) -Depth 3 | Set-Content $sessionsFile
+        [System.IO.File]::WriteAllText($sessionsFile, (ConvertTo-Json @($sessions) -Depth 3), (New-Object System.Text.UTF8Encoding $false))
     } catch {}
 }

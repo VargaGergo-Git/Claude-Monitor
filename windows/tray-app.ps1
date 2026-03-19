@@ -6,6 +6,13 @@
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
+# -- Single instance guard ----------------------------------
+$script:Mutex = New-Object System.Threading.Mutex($false, "Global\ClaudeMonitorTrayApp")
+if (-not $script:Mutex.WaitOne(0, $false)) {
+    # Another instance is already running -- exit silently
+    exit 0
+}
+
 $script:ClaudeDir = Join-Path $env:USERPROFILE ".claude"
 $script:Sessions = @()
 $script:NameCache = @{}
@@ -603,7 +610,7 @@ function Build-Menu {
 function Make-Bar($pct, $width) {
     $filled = [int]($pct * $width / 100)
     if ($filled -gt $width) { $filled = $width }
-    $bar = ("#" * $filled) + ("-" * ($width - $filled))
+    $bar = ([string]::new([char]0x2588, $filled)) + ([string]::new([char]0x2591, ($width - $filled)))
     return $bar
 }
 
@@ -687,4 +694,5 @@ $haikuTimer.Start()
 # Cleanup
 $script:TrayIcon.Visible = $false
 $script:TrayIcon.Dispose()
-$bitmap.Dispose()
+try { $script:Mutex.ReleaseMutex() } catch {}
+try { $script:Mutex.Dispose() } catch {}

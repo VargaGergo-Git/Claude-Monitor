@@ -247,6 +247,16 @@ function Install-App {
         return
     }
 
+    # Kill ALL existing tray app instances before installing
+    try {
+        Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -match 'tray-app\.ps1' } |
+            ForEach-Object {
+                Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+            }
+        Start-Sleep -Milliseconds 500
+    } catch {}
+
     Copy-Item $src $dst -Force
     Write-Ok "Tray app installed to $dst"
 
@@ -259,7 +269,7 @@ start /min powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File "%USERPR
 
     Write-Ok "Launcher created: $launcher"
 
-    # Launch it
+    # Launch ONE instance
     Start-Process -FilePath "powershell.exe" -ArgumentList "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$dst`"" -WindowStyle Hidden
     Write-Ok "Claude Monitor is running in your system tray"
 }

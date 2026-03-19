@@ -22,7 +22,7 @@ if ($SessionId -and (Test-Path $sessionsFile)) {
         $sessions | ForEach-Object {
             if ($_.id -eq $SessionId) { $_.lastActive = $now }
         }
-        ConvertTo-Json @($sessions) -Depth 3 | Set-Content $sessionsFile
+        [System.IO.File]::WriteAllText($sessionsFile, (ConvertTo-Json @($sessions) -Depth 3), (New-Object System.Text.UTF8Encoding $false))
     } catch {}
 }
 
