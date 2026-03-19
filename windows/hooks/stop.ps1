@@ -2,6 +2,8 @@
 # Hook type: Stop
 # PowerShell version for native Windows Claude Code
 
+$ErrorActionPreference = 'SilentlyContinue'
+
 $InputData = [Console]::In.ReadToEnd()
 $json = $InputData | ConvertFrom-Json -ErrorAction SilentlyContinue
 if (-not $json) { exit }

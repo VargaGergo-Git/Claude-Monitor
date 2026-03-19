@@ -2,13 +2,21 @@
 # Hook type: SessionStart
 # PowerShell version for native Windows Claude Code
 
-$InputData = [Console]::In.ReadToEnd()
+$ErrorActionPreference = 'SilentlyContinue'
+
+# Only read stdin if it's piped -- avoids blocking when Claude Code
+# doesn't pipe data to this hook event
+$InputData = ""
+if ([Console]::IsInputRedirected) {
+    $InputData = [Console]::In.ReadToEnd()
+}
+
 $json = $InputData | ConvertFrom-Json -ErrorAction SilentlyContinue
-if (-not $json) { exit }
+if (-not $json) { exit 0 }
 
 $Dir = $json.cwd
 $SessionId = $json.session_id
-if (-not $Dir) { exit }
+if (-not $Dir) { exit 0 }
 
 $claudeDir = Join-Path $env:USERPROFILE ".claude"
 
@@ -20,7 +28,7 @@ Set-Content -Path (Join-Path $claudeDir ".agent_activity") -Value "" -ErrorActio
 # -- Session tracking --------------------------------------
 $sessionsFile = Join-Path $claudeDir ".sessions.json"
 if (-not (Test-Path $sessionsFile)) {
-    Set-Content -Path $sessionsFile -Value "[]"
+    Set-Content -Path $sessionsFile -Value "[]" -ErrorAction SilentlyContinue
 }
 
 if ($SessionId) {
@@ -31,7 +39,7 @@ if ($SessionId) {
         Push-Location $Dir
         $branch = git branch --show-current 2>$null
         Pop-Location
-    } catch { Pop-Location }
+    } catch { try { Pop-Location } catch {} }
 
     try {
         $sessions = Get-Content $sessionsFile -Raw | ConvertFrom-Json -ErrorAction SilentlyContinue
@@ -53,7 +61,7 @@ if ($SessionId) {
             agents = 0
         }
 
-        ConvertTo-Json @($sessions) -Depth 3 | Set-Content $sessionsFile
+        ConvertTo-Json @($sessions) -Depth 3 | Set-Content $sessionsFile -ErrorAction SilentlyContinue
     } catch {}
 }
 
@@ -78,7 +86,7 @@ try {
         if ($dirty -gt 0) { $gitMsg += " -- $dirty uncommitted changes" }
         $msg = if ($msg) { "$msg`n$gitMsg" } else { $gitMsg }
     }
-} catch { Pop-Location }
+} catch { try { Pop-Location } catch {} }
 
 if ($msg) {
     @{ systemMessage = $msg } | ConvertTo-Json -Compress
