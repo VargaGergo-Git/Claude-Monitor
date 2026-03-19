@@ -62,8 +62,16 @@ public class WinCred {
         if (!CredRead(target, 1, 0, out ptr)) return null;
         var cred = (CREDENTIAL)Marshal.PtrToStructure(ptr, typeof(CREDENTIAL));
         string pass = null;
-        if (cred.CredentialBlobSize > 0)
+        if (cred.CredentialBlobSize > 0) {
+            // Try UTF-16 first (standard Windows credential encoding)
             pass = Marshal.PtrToStringUni(cred.CredentialBlob, cred.CredentialBlobSize / 2);
+            // If it doesn't look like JSON, try UTF-8 (Node.js apps often store UTF-8)
+            if (pass == null || !pass.TrimStart().StartsWith("{")) {
+                byte[] bytes = new byte[cred.CredentialBlobSize];
+                Marshal.Copy(cred.CredentialBlob, bytes, 0, cred.CredentialBlobSize);
+                pass = System.Text.Encoding.UTF8.GetString(bytes);
+            }
+        }
         CredFree(ptr);
         return pass;
     }

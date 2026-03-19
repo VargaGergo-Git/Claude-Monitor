@@ -56,6 +56,7 @@ if ($CacheAge -ge 300) {
         Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 public class WinCredSL {
     [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
     public static extern bool CredRead(string target, int type, int reserved, out IntPtr cred);
@@ -75,15 +76,29 @@ public class WinCredSL {
         if (!CredRead(target, 1, 0, out ptr)) return null;
         var cred = (CREDENTIAL)Marshal.PtrToStructure(ptr, typeof(CREDENTIAL));
         string pass = null;
-        if (cred.CredentialBlobSize > 0)
+        if (cred.CredentialBlobSize > 0) {
+            // Try UTF-16 first (standard Windows credential encoding)
             pass = Marshal.PtrToStringUni(cred.CredentialBlob, cred.CredentialBlobSize / 2);
+            // If it doesn't look like JSON, try UTF-8 (Node.js apps often store UTF-8)
+            if (pass == null || !pass.TrimStart().StartsWith("{")) {
+                byte[] bytes = new byte[cred.CredentialBlobSize];
+                Marshal.Copy(cred.CredentialBlob, bytes, 0, cred.CredentialBlobSize);
+                pass = Encoding.UTF8.GetString(bytes);
+            }
+        }
         CredFree(ptr);
         return pass;
     }
 }
 "@ -ErrorAction SilentlyContinue
 
-        $credJson = [WinCredSL]::GetPassword("Claude Code-credentials")
+        # Try multiple credential target names (Claude Code may vary)
+        $credJson = $null
+        foreach ($target in @("Claude Code-credentials", "claude-code-credentials", "Claude Code/credentials")) {
+            $credJson = [WinCredSL]::GetPassword($target)
+            if ($credJson -and $credJson.TrimStart().StartsWith('{')) { break }
+            $credJson = $null
+        }
         if ($credJson) {
             $credObj = $credJson | ConvertFrom-Json
             $Token = $credObj.claudeAiOauth.accessToken
