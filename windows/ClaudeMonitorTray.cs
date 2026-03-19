@@ -519,7 +519,7 @@ class ClaudeMonitor : ApplicationContext {
 
         ThreadPool.QueueUserWorkItem(new WaitCallback(delegate(object state) {
             try {
-                string result = CallHaikuApi(tok, "Give a 2-5 word title for this coding task. Reply ONLY the title. Task: " + msg, 30);
+                string result = CallHaikuApi(tok, "What is the goal or theme of this coding session? Summarize in 2-5 words (e.g. 'Sleep Lab Redesign', 'Fix Auth Bug', 'Sync Pipeline Hardening'). Reply ONLY the theme. User's request: " + msg, 30);
                 if (!string.IsNullOrEmpty(result)) {
                     lock (sessionNames) { sessionNames[sid] = result; }
                     SaveSessionNames();

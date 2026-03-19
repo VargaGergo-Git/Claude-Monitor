@@ -160,7 +160,7 @@ function Resolve-Names {
             continue
         }
 
-        $name = Invoke-Haiku "Give a 2-5 word title for this coding task. Reply ONLY the title. Task: $rawMsg" 15
+        $name = Invoke-Haiku "What is the goal or theme of this coding session? Summarize in 2-5 words (e.g. 'Sleep Lab Redesign', 'Fix Auth Bug', 'Sync Pipeline Hardening'). Reply ONLY the theme. User's request: $rawMsg" 15
         if (-not $name) {
             $name = ($rawMsg -split "`n")[0]
             if ($name.Length -gt 35) { $name = $name.Substring(0, 35) }
