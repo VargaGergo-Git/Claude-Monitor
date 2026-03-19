@@ -56,54 +56,11 @@ if (Test-Path $Cache) {
 if ($CacheAge -ge 300) {
     $Token = ""
     try {
-        Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-using System.Text;
-public class WinCredSL {
-    [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
-    public static extern bool CredRead(string target, int type, int reserved, out IntPtr cred);
-    [DllImport("advapi32.dll")]
-    public static extern void CredFree(IntPtr cred);
-    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
-    public struct CREDENTIAL {
-        public int Flags; public int Type;
-        public string TargetName; public string Comment;
-        public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
-        public int CredentialBlobSize; public IntPtr CredentialBlob;
-        public int Persist; public int AttributeCount;
-        public IntPtr Attributes; public string TargetAlias; public string UserName;
-    }
-    public static string GetPassword(string target) {
-        IntPtr ptr;
-        if (!CredRead(target, 1, 0, out ptr)) return null;
-        var cred = (CREDENTIAL)Marshal.PtrToStructure(ptr, typeof(CREDENTIAL));
-        string pass = null;
-        if (cred.CredentialBlobSize > 0) {
-            // Try UTF-16 first (standard Windows credential encoding)
-            pass = Marshal.PtrToStringUni(cred.CredentialBlob, cred.CredentialBlobSize / 2);
-            // If it doesn't look like JSON, try UTF-8 (Node.js apps often store UTF-8)
-            if (pass == null || !pass.TrimStart().StartsWith("{")) {
-                byte[] bytes = new byte[cred.CredentialBlobSize];
-                Marshal.Copy(cred.CredentialBlob, bytes, 0, cred.CredentialBlobSize);
-                pass = Encoding.UTF8.GetString(bytes);
-            }
-        }
-        CredFree(ptr);
-        return pass;
-    }
-}
-"@ -ErrorAction SilentlyContinue
-
-        # Try multiple credential target names (Claude Code may vary)
-        $credJson = $null
-        foreach ($target in @("Claude Code-credentials", "claude-code-credentials", "Claude Code/credentials")) {
-            $credJson = [WinCredSL]::GetPassword($target)
-            if ($credJson -and $credJson.TrimStart().StartsWith('{')) { break }
-            $credJson = $null
-        }
-        if ($credJson) {
-            $credObj = $credJson | ConvertFrom-Json
+        # Claude Code on Windows stores OAuth tokens in a plain JSON file
+        # (not Windows Credential Manager — confirmed via GitHub issue #29049)
+        $credFile = Join-Path $env:USERPROFILE ".claude\.credentials.json"
+        if (Test-Path $credFile) {
+            $credObj = Get-Content $credFile -Raw | ConvertFrom-Json
             $Token = $credObj.claudeAiOauth.accessToken
         }
     } catch {}
