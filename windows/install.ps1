@@ -19,10 +19,39 @@ function Write-Warn($msg)  { Write-Host "[!] " -ForegroundColor Yellow -NoNewlin
 function Write-Err($msg)   { Write-Host "[X] " -ForegroundColor Red -NoNewline; Write-Host $msg }
 
 # Write settings.json in UTF-8 (no BOM). PS 5.1's Set-Content defaults to
-# ANSI encoding, which corrupts Unicode chars like ő when Node.js reads as UTF-8.
+# ANSI encoding, which corrupts Unicode chars like o-double-acute when
+# Node.js reads as UTF-8.
 $Utf8NoBom = New-Object System.Text.UTF8Encoding $false
 function Write-SettingsJson($content) {
     [System.IO.File]::WriteAllText($Settings, $content, $Utf8NoBom)
+}
+
+# Generate an EncodedCommand that runs a script via $env:USERPROFILE.
+# This avoids passing Unicode chars (like o-double-acute in Hungarian usernames)
+# through cmd.exe, which corrupts them and breaks hook paths.
+function Get-EncodedHookCmd($relPath) {
+    $script = "& (Join-Path `$env:USERPROFILE '$relPath')"
+    $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($script))
+    return "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encoded"
+}
+
+# Convert all hook/statusLine commands from -File to -EncodedCommand.
+# This is the key fix for Unicode usernames on Windows.
+function ConvertTo-SafeCommands($config) {
+    if ($config.hooks) {
+        foreach ($eventProp in $config.hooks.PSObject.Properties) {
+            foreach ($group in $eventProp.Value) {
+                foreach ($h in $group.hooks) {
+                    if ($h.command -match '\\hooks\\([^\\]+\.ps1)') {
+                        $h.command = Get-EncodedHookCmd ".claude\hooks\$($matches[1])"
+                    }
+                }
+            }
+        }
+    }
+    if ($config.statusLine -and $config.statusLine.command -match 'statusline\.ps1') {
+        $config.statusLine.command = Get-EncodedHookCmd '.claude\statusline.ps1'
+    }
 }
 
 Write-Host ""
@@ -113,18 +142,6 @@ function Install-Statusline {
     Write-Ok "Statusline installed"
 }
 
-# -- Resolve %USERPROFILE% in settings.json ---------------
-# cmd.exe can corrupt Unicode chars in paths when expanding %USERPROFILE%.
-# Bake the real path into settings.json so hooks are always found.
-function Resolve-SettingsPaths {
-    if (-not (Test-Path $Settings)) { return }
-    $content = Get-Content $Settings -Raw -ErrorAction SilentlyContinue
-    if (-not $content -or $content -notmatch '%USERPROFILE%') { return }
-    $resolved = $content.Replace('%USERPROFILE%', $env:USERPROFILE.Replace('\', '\\'))
-    Write-SettingsJson $resolved
-    Write-Ok "Resolved %USERPROFILE% to real path in settings.json"
-}
-
 # -- Configure settings.json ------------------------------
 function Configure-Settings {
     Write-Info "Configuring settings.json..."
@@ -135,14 +152,14 @@ function Configure-Settings {
         return
     }
 
+    $template = Get-Content $templatePath -Raw | ConvertFrom-Json
+
     if (-not (Test-Path $Settings)) {
         # Create new settings from template
-        $template = Get-Content $templatePath -Raw | ConvertFrom-Json
-        # Remove comment fields
         $template.PSObject.Properties.Remove('_comment')
         $template.PSObject.Properties.Remove('_instructions')
+        ConvertTo-SafeCommands $template
         Write-SettingsJson ($template | ConvertTo-Json -Depth 10)
-        Resolve-SettingsPaths
         Write-Ok "Created settings.json with hooks configuration"
         return
     }
@@ -156,11 +173,10 @@ function Configure-Settings {
 
     if (-not $existing) {
         # settings.json is empty or invalid -- create from template
-        $template = Get-Content $templatePath -Raw | ConvertFrom-Json
         $template.PSObject.Properties.Remove('_comment')
         $template.PSObject.Properties.Remove('_instructions')
+        ConvertTo-SafeCommands $template
         Write-SettingsJson ($template | ConvertTo-Json -Depth 10)
-        Resolve-SettingsPaths
         Write-Ok "Created settings.json from template (previous file was empty/invalid)"
         return
     }
@@ -174,16 +190,33 @@ function Configure-Settings {
             $backup = "$Settings.pre-monitor-statusline-backup"
             Copy-Item $Settings $backup -Force
             $existing | Add-Member -NotePropertyName "statusLine" -NotePropertyValue $template.statusLine -Force
-            Write-SettingsJson ($existing | ConvertTo-Json -Depth 10)
-            Write-Ok "Added missing statusLine to settings.json (backup: $backup)"
         }
 
-        # Fix %USERPROFILE% and re-encode as UTF-8 (Unicode username safety)
-        Resolve-SettingsPaths
-        # Re-save as UTF-8 even if no %USERPROFILE% to replace (prior
-        # installs may have written ANSI which corrupts Unicode paths)
-        $raw = Get-Content $Settings -Raw -ErrorAction SilentlyContinue
-        if ($raw) { Write-SettingsJson $raw }
+        # Convert existing commands to EncodedCommand (Unicode username fix)
+        $needsFix = $false
+        foreach ($eventProp in $existing.hooks.PSObject.Properties) {
+            foreach ($group in $eventProp.Value) {
+                foreach ($h in $group.hooks) {
+                    if ($h.command -match '-File\s' -and $h.command -match '\.ps1') {
+                        $needsFix = $true
+                        break
+                    }
+                }
+                if ($needsFix) { break }
+            }
+            if ($needsFix) { break }
+        }
+
+        if ($needsFix) {
+            $backup = "$Settings.pre-unicode-fix-backup"
+            Copy-Item $Settings $backup -Force
+            ConvertTo-SafeCommands $existing
+            Write-SettingsJson ($existing | ConvertTo-Json -Depth 10)
+            Write-Ok "Converted hook commands to EncodedCommand (Unicode username fix)"
+        } else {
+            # Still re-save as UTF-8
+            Write-SettingsJson ($existing | ConvertTo-Json -Depth 10)
+        }
         return
     }
 
@@ -191,18 +224,15 @@ function Configure-Settings {
     $backup = "$Settings.pre-monitor-backup"
     Copy-Item $Settings $backup -Force
 
-    $template = Get-Content $templatePath -Raw | ConvertFrom-Json
     $existing | Add-Member -NotePropertyName "hooks" -NotePropertyValue $template.hooks -Force
     if ($template.statusLine) {
         $existing | Add-Member -NotePropertyName "statusLine" -NotePropertyValue $template.statusLine -Force
     }
+    ConvertTo-SafeCommands $existing
     Write-SettingsJson ($existing | ConvertTo-Json -Depth 10)
 
     Write-Ok "Merged hooks + statusline into settings.json"
     Write-Ok "Backup saved to $backup"
-
-    # Fix %USERPROFILE% in hook commands (Unicode username safety)
-    Resolve-SettingsPaths
 }
 
 # -- Install tray app -------------------------------------
