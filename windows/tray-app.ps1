@@ -38,46 +38,8 @@ $script:PendingCtx = [System.Collections.Generic.HashSet[string]]::new()
 $script:HaikuCallCount = [int](Get-Setting "HaikuCalls" 0)
 $script:HaikuTokensUsed = [int](Get-Setting "HaikuTokens" 0)
 
-# -- Windows Credential Manager (P/Invoke) --------------------
-try {
-    Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-public class WinCred {
-    [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
-    public static extern bool CredRead(string target, int type, int reserved, out IntPtr cred);
-    [DllImport("advapi32.dll")]
-    public static extern void CredFree(IntPtr cred);
-    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
-    public struct CREDENTIAL {
-        public int Flags; public int Type;
-        public string TargetName; public string Comment;
-        public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
-        public int CredentialBlobSize; public IntPtr CredentialBlob;
-        public int Persist; public int AttributeCount;
-        public IntPtr Attributes; public string TargetAlias; public string UserName;
-    }
-    public static string GetPassword(string target) {
-        IntPtr ptr;
-        if (!CredRead(target, 1, 0, out ptr)) return null;
-        var cred = (CREDENTIAL)Marshal.PtrToStructure(ptr, typeof(CREDENTIAL));
-        string pass = null;
-        if (cred.CredentialBlobSize > 0) {
-            // Try UTF-16 first (standard Windows credential encoding)
-            pass = Marshal.PtrToStringUni(cred.CredentialBlob, cred.CredentialBlobSize / 2);
-            // If it doesn't look like JSON, try UTF-8 (Node.js apps often store UTF-8)
-            if (pass == null || !pass.TrimStart().StartsWith("{")) {
-                byte[] bytes = new byte[cred.CredentialBlobSize];
-                Marshal.Copy(cred.CredentialBlob, bytes, 0, cred.CredentialBlobSize);
-                pass = System.Text.Encoding.UTF8.GetString(bytes);
-            }
-        }
-        CredFree(ptr);
-        return pass;
-    }
-}
-"@ -ErrorAction SilentlyContinue
-} catch {}
+# -- Credential File (Claude Code stores OAuth in a plain JSON file) --
+# Windows: ~/.claude/.credentials.json (not Credential Manager)
 
 # -- Toast Notifications -------------------------------------
 function Show-Notification($Title, $Body) {
@@ -110,9 +72,9 @@ function Save-NameToCache($sid, $name) {
 function Get-OAuthToken {
     if ($script:CachedToken) { return $script:CachedToken }
     try {
-        $credJson = [WinCred]::GetPassword("Claude Code-credentials")
-        if ($credJson) {
-            $credObj = $credJson | ConvertFrom-Json
+        $credFile = Join-Path $script:ClaudeDir ".credentials.json"
+        if (Test-Path $credFile) {
+            $credObj = Get-Content $credFile -Raw | ConvertFrom-Json
             $token = $credObj.claudeAiOauth.accessToken
             if ($token) { $script:CachedToken = $token; return $token }
         }
@@ -411,10 +373,24 @@ function Build-Menu {
 
     $n = $script:Sessions.Count
     $waitingCount = ($script:Sessions | Where-Object { $_.State -eq "waiting" }).Count
+    $activeCount = ($script:Sessions | Where-Object { $_.State -eq "active" }).Count
+    $ctxHighCount = ($script:Sessions | Where-Object { $_.ContextPct -ge 80 }).Count
 
-    # Update tray icon tooltip
-    $tooltip = "Claude Monitor: $n session$(if ($n -ne 1) {'s'})"
-    if ($waitingCount -gt 0) { $tooltip += " ($waitingCount waiting)" }
+    # Dynamic icon color: red (context warning) > amber (waiting) > green (active) > gray (idle)
+    $script:TrayIcon.Icon = if ($ctxHighCount -gt 0) { $script:IconRed }
+        elseif ($waitingCount -gt 0) { $script:IconAmber }
+        elseif ($activeCount -gt 0) { $script:IconGreen }
+        else { $script:IconGray }
+
+    # Rich tooltip with session info
+    $activeSession = $script:Sessions | Where-Object { $_.State -eq "active" } | Select-Object -First 1
+    $timerStr = if ($activeSession) { $activeSession.Duration } else { "" }
+    $tooltip = "Claude Monitor"
+    if ($n -gt 0) {
+        $tooltip = "$n session$(if ($n -ne 1) {'s'})"
+        if ($waitingCount -gt 0) { $tooltip += " ($waitingCount waiting)" }
+        if ($timerStr) { $tooltip += " - $timerStr" }
+    }
     $script:TrayIcon.Text = $tooltip
 
     if ($n -eq 0) {
@@ -434,11 +410,35 @@ function Build-Menu {
             $header.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
             $header.ForeColor = [System.Drawing.Color]::White
 
-            # Branch warning
+            # Branch warning + split
             if ($group.Count -gt 1) {
                 $warn = $menu.Items.Add("  ! $($group.Count) sessions sharing one branch")
                 $warn.Enabled = $false
                 $warn.ForeColor = [System.Drawing.Color]::FromArgb(255, 190, 70)
+
+                $splitItem = $menu.Items.Add("  -> Split into separate branches")
+                $splitItem.ForeColor = [System.Drawing.Color]::FromArgb(0, 180, 155)
+                $splitData = @{ Dir = $first.Dir; Branch = $first.Branch; Sessions = $group.Group }
+                $splitItem.Tag = $splitData
+                $splitItem.Add_Click({
+                    $data = $this.Tag
+                    $dir = $data.Dir; $base = $data.Branch
+                    $commands = @("# Run in each terminal after exiting Claude:`n")
+                    $created = @()
+                    $i = 0
+                    foreach ($s in $data.Sessions) {
+                        $raw = if ($s.Name) { $s.Name } else { "session-$i" }
+                        $slug = ($raw.ToLower() -replace '[^a-z0-9-]', '-').Substring(0, [Math]::Min($raw.Length, 30))
+                        $branch = "$base-$slug"
+                        if ($i -eq 0) { $commands += "# $raw : stays on $base`n"; $i++; continue }
+                        git -C $dir branch $branch $base 2>$null
+                        $created += $branch
+                        $commands += "# $raw`ngit checkout $branch`n"
+                        $i++
+                    }
+                    [System.Windows.Forms.Clipboard]::SetText($commands -join "`n")
+                    Show-Notification "Branches Split" "Created $($created.Count) branches. Commands copied to clipboard."
+                })
             }
 
             # Git info
@@ -614,22 +614,31 @@ function Get-UsageColor($pct) {
 }
 
 # -- Create tray icon ---------------------------------------
-# Draw a simple diamond icon
-$bitmap = New-Object System.Drawing.Bitmap(16, 16)
-$g = [System.Drawing.Graphics]::FromImage($bitmap)
-$g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-$points = @(
-    [System.Drawing.Point]::new(8, 1),
-    [System.Drawing.Point]::new(15, 8),
-    [System.Drawing.Point]::new(8, 15),
-    [System.Drawing.Point]::new(1, 8)
-)
-$g.FillPolygon([System.Drawing.Brushes]::DodgerBlue, $points)
-$g.Dispose()
-$icon = [System.Drawing.Icon]::FromHandle($bitmap.GetHicon())
+function New-DiamondIcon($color) {
+    $bmp = New-Object System.Drawing.Bitmap(16, 16)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $g.Clear([System.Drawing.Color]::Transparent)
+    $pts = @(
+        [System.Drawing.Point]::new(8, 1),
+        [System.Drawing.Point]::new(15, 8),
+        [System.Drawing.Point]::new(8, 15),
+        [System.Drawing.Point]::new(1, 8)
+    )
+    $brush = New-Object System.Drawing.SolidBrush($color)
+    $g.FillPolygon($brush, $pts)
+    $brush.Dispose(); $g.Dispose()
+    return [System.Drawing.Icon]::FromHandle($bmp.GetHicon())
+}
+
+# Icon colors matching macOS menu bar states
+$script:IconGreen  = New-DiamondIcon ([System.Drawing.Color]::FromArgb(77, 217, 115))   # active
+$script:IconAmber  = New-DiamondIcon ([System.Drawing.Color]::FromArgb(242, 191, 51))    # waiting
+$script:IconGray   = New-DiamondIcon ([System.Drawing.Color]::FromArgb(100, 100, 140))   # idle
+$script:IconRed    = New-DiamondIcon ([System.Drawing.Color]::FromArgb(210, 56, 46))     # context warning
 
 $script:TrayIcon = New-Object System.Windows.Forms.NotifyIcon
-$script:TrayIcon.Icon = $icon
+$script:TrayIcon.Icon = $script:IconGray
 $script:TrayIcon.Text = "Claude Monitor"
 $script:TrayIcon.Visible = $true
 
