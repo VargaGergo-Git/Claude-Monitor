@@ -239,43 +239,70 @@ function Configure-Settings {
 function Install-App {
     Write-Info "Installing Claude Monitor tray app..."
 
-    $src = Join-Path $ScriptDir "tray-app.ps1"
-    $dst = Join-Path $ClaudeDir "tray-app.ps1"
-
-    if (-not (Test-Path $src)) {
-        Write-Err "tray-app.ps1 not found"
-        return
-    }
-
     # Kill ALL existing tray app instances before installing
     try {
+        # Kill old PowerShell-based tray apps
         Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
             Where-Object { $_.CommandLine -match 'tray-app\.ps1' } |
-            ForEach-Object {
-                Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-            }
+            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+        # Kill old compiled tray apps
+        Get-Process "ClaudeMonitor" -ErrorAction SilentlyContinue |
+            Stop-Process -Force -ErrorAction SilentlyContinue
         Start-Sleep -Milliseconds 500
     } catch {}
 
-    Copy-Item $src $dst -Force
-    Write-Ok "Tray app installed to $dst"
+    # Compile the C# tray app to a native .exe (no PowerShell encoding issues)
+    $csSrc = Join-Path $ScriptDir "ClaudeMonitorTray.cs"
+    $exeDst = Join-Path $ClaudeDir "ClaudeMonitor.exe"
 
-    # Generate EncodedCommand that resolves path via $env:USERPROFILE
-    # (avoids Unicode username corruption through cmd.exe / argument passing)
-    $launchScript = '& (Join-Path $env:USERPROFILE ".claude\tray-app.ps1")'
-    $encodedLaunch = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($launchScript))
+    if (-not (Test-Path $csSrc)) {
+        Write-Warn "ClaudeMonitorTray.cs not found -- skipping tray app"
+        return
+    }
+
+    $cscDir = [System.Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()
+    $csc = Join-Path $cscDir "csc.exe"
+
+    if (-not (Test-Path $csc)) {
+        Write-Warn "C# compiler not found at $csc -- skipping tray app"
+        Write-Warn "Install .NET Framework Developer Pack to enable the tray app"
+        return
+    }
+
+    Write-Info "Compiling tray app..."
+    $refs = @(
+        "/r:System.Windows.Forms.dll",
+        "/r:System.Drawing.dll",
+        "/r:System.Web.Extensions.dll"
+    )
+    $compileArgs = @("/nologo", "/target:winexe", "/optimize+", "/out:$exeDst") + $refs + @($csSrc)
+    $result = & $csc @compileArgs 2>&1
+
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Compilation failed:"
+        $result | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+        # Fall back to PowerShell version
+        $psSrc = Join-Path $ScriptDir "tray-app.ps1"
+        if (Test-Path $psSrc) {
+            Copy-Item $psSrc (Join-Path $ClaudeDir "tray-app.ps1") -Force
+            Write-Warn "Falling back to PowerShell tray app"
+        }
+        return
+    }
+
+    Write-Ok "Compiled ClaudeMonitor.exe"
 
     # Create a launcher batch file for easy startup / login
     $launcher = Join-Path $ClaudeDir "ClaudeMonitor.bat"
     @"
 @echo off
-start /min powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand $encodedLaunch
+start "" "$exeDst"
 "@ | Set-Content $launcher
 
     Write-Ok "Launcher created: $launcher"
 
-    # Launch ONE instance using EncodedCommand (Unicode-safe)
-    Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand $encodedLaunch" -WindowStyle Hidden
+    # Launch the compiled app
+    Start-Process -FilePath $exeDst -WindowStyle Hidden
     Write-Ok "Claude Monitor is running in your system tray"
 }
 
