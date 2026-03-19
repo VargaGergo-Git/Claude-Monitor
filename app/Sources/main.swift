@@ -187,7 +187,7 @@ class OverlayView: NSView {
         dp.line(to: NSPoint(x: 16, y: y + 28)); dp.line(to: NSPoint(x: 10, y: y + 19)); dp.close()
         diamondColor.setFill(); dp.fill()
         // Diamond glow
-        NSColor(calibratedRed: diamondColor.redComponent, green: diamondColor.greenComponent, blue: diamondColor.blueComponent, alpha: 0.15).setFill()
+        diamondColor.withAlphaComponent(0.15).setFill()
         let glowDp = NSBezierPath()
         glowDp.move(to: NSPoint(x: 16, y: y + 7)); glowDp.line(to: NSPoint(x: 25, y: y + 19))
         glowDp.line(to: NSPoint(x: 16, y: y + 31)); glowDp.line(to: NSPoint(x: 7, y: y + 19)); glowDp.close()
@@ -265,7 +265,7 @@ class OverlayView: NSView {
                 s.state == "waiting" ? NSColor(red: 0.9, green: 0.7, blue: 0.15, alpha: 1) :
                 NSColor(white: 0.2, alpha: 1)
             if s.state == "active" || s.state == "waiting" {
-                NSColor(calibratedRed: dotColor.redComponent, green: dotColor.greenComponent, blue: dotColor.blueComponent, alpha: 0.2).setFill()
+                dotColor.withAlphaComponent(0.2).setFill()
                 NSBezierPath(ovalIn: NSRect(x: cx - 2, y: cy + 1, width: 12, height: 12)).fill()
             }
             dotColor.setFill()
@@ -468,7 +468,7 @@ class OverlayView: NSView {
 
 // MARK: - Monitor
 
-class Monitor: NSObject, NSApplicationDelegate {
+class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate {
     private var statusItem: NSStatusItem!
     private var sessions: [Session] = []
     private let home = NSHomeDirectory()
@@ -517,6 +517,9 @@ class Monitor: NSObject, NSApplicationDelegate {
         cleanupStaleFiles()
         loadNameCache()
         velocityTracker = VelocityTracker(home: home)
+
+        // Notification click handler — jump to session terminal
+        NSUserNotificationCenter.default.delegate = self
 
         overlayPanel = OverlayPanel()
         overlayView = OverlayView(frame: NSRect(x: 0, y: 0, width: 340, height: 48))
@@ -568,7 +571,7 @@ class Monitor: NSObject, NSApplicationDelegate {
         let waiting = sessions.filter { $0.state == "waiting" && !$0.tty.isEmpty }
         guard !waiting.isEmpty else { return }
         for s in waiting { typeInTerminal(tty: s.tty, text: "/compact") }
-        notify(title: "Claude Monitor", body: "Sent /compact to \(waiting.count) session\(waiting.count != 1 ? "s" : "")", sound: "Tink")
+        sendNotification(title: "Claude Monitor", body: "Sent /compact to \(waiting.count) session\(waiting.count != 1 ? "s" : "")", sound: "Tink")
     }
 
     private func exportSummary() {
@@ -586,7 +589,7 @@ class Monitor: NSObject, NSApplicationDelegate {
         let text = lines.joined(separator: "\n")
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
-        notify(title: "Claude Monitor", body: "Session summary copied to clipboard", sound: "Tink")
+        sendNotification(title: "Claude Monitor", body: "Session summary copied to clipboard", sound: "Tink")
     }
 
     // MARK: - File Conflict Detection
@@ -702,20 +705,43 @@ class Monitor: NSObject, NSApplicationDelegate {
         for s in sessions where !s.sid.isEmpty {
             let prev = prevStates[s.sid] ?? ""
             if notifyWaiting && prev == "active" && s.state == "waiting" {
-                notify(title: s.name.isEmpty ? s.project : s.name, body: "Ready for your input", sound: notifySound ? "Tink" : nil) }
+                let name = s.name.isEmpty ? s.project : s.name
+                sendNotification(title: name, body: "Ready for your input \u{2014} click to jump",
+                                 sound: notifySound ? "Tink" : nil, tty: s.tty)
+            }
             if notifyContext && s.contextPct >= 80 && !ctxWarned.contains(s.sid) {
                 ctxWarned.insert(s.sid)
-                notify(title: "\(s.name.isEmpty ? s.project : s.name) \u{2014} Context \(s.contextPct)%", body: "Consider running /compact", sound: notifySound ? "Submarine" : nil) }
+                let name = s.name.isEmpty ? s.project : s.name
+                sendNotification(title: "\(name) \u{2014} Context \(s.contextPct)%",
+                                 body: "Consider running /compact \u{2014} click to jump",
+                                 sound: notifySound ? "Submarine" : nil, tty: s.tty)
+            }
             prevStates[s.sid] = s.state
         }
     }
 
-    private func notify(title: String, body: String, sound: String? = "Tink") {
-        let et = title.replacingOccurrences(of: "\"", with: "'"); let eb = body.replacingOccurrences(of: "\"", with: "'")
-        let sp = sound != nil ? " sound name \"\(sound!)\"" : ""
-        let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        p.arguments = ["-e", "display notification \"\(eb)\" with title \"\(et)\"\(sp)"]
-        p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice; try? p.run()
+    private func sendNotification(title: String, body: String, sound: String? = "Tink", tty: String = "") {
+        let n = NSUserNotification()
+        n.title = title
+        n.informativeText = body
+        if let soundName = sound { n.soundName = soundName }
+        // Store tty so we can jump to it when clicked
+        n.userInfo = ["tty": tty]
+        NSUserNotificationCenter.default.deliver(n)
+    }
+
+    // Clicking a notification jumps to the session's terminal tab
+    func userNotificationCenter(_ center: NSUserNotificationCenter, didActivate notification: NSUserNotification) {
+        if let tty = notification.userInfo?["tty"] as? String, !tty.isEmpty {
+            jumpToSession(Session(pid: "", project: "", branch: "", dir: "", duration: "", tty: tty,
+                lastCommit: "", context: "", name: "", sid: "", modifiedFiles: 0, state: "",
+                contextPct: 0, smartContext: "", agentCount: 0, agentDescs: [], editedFiles: []))
+        }
+    }
+
+    // Always show notifications even when app is frontmost
+    func userNotificationCenter(_ center: NSUserNotificationCenter, shouldPresent notification: NSUserNotification) -> Bool {
+        return true
     }
 
     private func loadNameCache() {
@@ -1005,7 +1031,7 @@ class Monitor: NSObject, NSApplicationDelegate {
             try? proc.run(); proc.waitUntilExit(); created.append(branch); cmds += ["git checkout \(branch)"]
         }
         NSPasteboard.general.clearContents(); NSPasteboard.general.setString(cmds.joined(separator: "\n"), forType: .string)
-        notify(title: "Branches Split", body: "Created \(created.count) branches. Commands copied.", sound: "Glass")
+        sendNotification(title: "Branches Split", body: "Created \(created.count) branches. Commands copied.", sound: "Glass")
     }
 
     // MARK: - Usage + Footer
@@ -1101,14 +1127,14 @@ class Monitor: NSObject, NSApplicationDelegate {
         if fm.fileExists(atPath: pp) {
             let p = Process(); p.executableURL = URL(fileURLWithPath: "/bin/launchctl"); p.arguments = ["unload", pp]
             p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice; try? p.run(); p.waitUntilExit()
-            try? fm.removeItem(atPath: pp); notify(title: "Claude Monitor", body: "Removed from Login Items")
+            try? fm.removeItem(atPath: pp); sendNotification(title: "Claude Monitor", body: "Removed from Login Items")
         } else {
             try? fm.createDirectory(atPath: "\(home)/Library/LaunchAgents", withIntermediateDirectories: true)
             let plist = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>Label</key><string>com.claude.monitor</string><key>ProgramArguments</key><array><string>/usr/bin/open</string><string>\(home)/.claude/ClaudeMonitor.app</string></array><key>RunAtLoad</key><true/><key>StandardOutPath</key><string>/dev/null</string><key>StandardErrorPath</key><string>/dev/null</string></dict></plist>"
             try? plist.write(toFile: pp, atomically: true, encoding: .utf8)
             let p = Process(); p.executableURL = URL(fileURLWithPath: "/bin/launchctl"); p.arguments = ["load", pp]
             p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice; try? p.run(); p.waitUntilExit()
-            notify(title: "Claude Monitor", body: "Will launch at login", sound: "Glass")
+            sendNotification(title: "Claude Monitor", body: "Will launch at login", sound: "Glass")
         }
         build()
     }
