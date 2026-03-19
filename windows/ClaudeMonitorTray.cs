@@ -26,8 +26,8 @@ class ClaudeMonitor : ApplicationContext {
     bool notifyWaiting = true;
     bool notifyContext = true;
 
-    // Floating overlay
-    bool showOverlay;
+    // Floating overlay — ON by default so user sees it immediately
+    bool showOverlay = true;
     OverlayForm overlay;
 
     // Haiku AI naming
@@ -47,18 +47,67 @@ class ClaudeMonitor : ApplicationContext {
         return (long)(DateTime.UtcNow - Epoch).TotalSeconds;
     }
 
+    // ── Logging ───────────────────────────────────────────
+    static string logPath;
+
+    static void Log(string msg) {
+        try {
+            if (string.IsNullOrEmpty(logPath)) return;
+            string line = DateTime.Now.ToString("HH:mm:ss") + " " + msg + "\r\n";
+            File.AppendAllText(logPath, line, Encoding.UTF8);
+        } catch {}
+    }
+
     // ── Entry point ─────────────────────────────────────
     static void Main() {
+        string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        logPath = Path.Combine(home, ".claude", ".monitor_log");
+        // Truncate log on startup (keep last 50 lines max)
+        try {
+            if (File.Exists(logPath)) {
+                string[] old = File.ReadAllLines(logPath);
+                if (old.Length > 50) {
+                    string[] keep = new string[50];
+                    Array.Copy(old, old.Length - 50, keep, 0, 50);
+                    File.WriteAllLines(logPath, keep, Encoding.UTF8);
+                }
+            }
+        } catch {}
+
+        Log("Starting ClaudeMonitor v2");
+
+        // Global exception handlers to prevent silent crashes
+        Application.ThreadException += new System.Threading.ThreadExceptionEventHandler(
+            delegate(object sender, System.Threading.ThreadExceptionEventArgs e) {
+                Log("ThreadException: " + e.Exception.ToString());
+            });
+        AppDomain.CurrentDomain.UnhandledException += new UnhandledExceptionEventHandler(
+            delegate(object sender, UnhandledExceptionEventArgs e) {
+                Log("UnhandledException: " + e.ExceptionObject.ToString());
+            });
+
         bool created;
-        Mutex mutex = new Mutex(true, @"Local\ClaudeMonitorTray", out created);
-        if (!created) return;
-        Application.EnableVisualStyles();
-        Application.Run(new ClaudeMonitor());
-        GC.KeepAlive(mutex);
+        try {
+            Mutex mutex = new Mutex(true, @"Local\ClaudeMonitorTray", out created);
+            if (!created) {
+                Log("Another instance is already running, exiting");
+                return;
+            }
+            Application.EnableVisualStyles();
+            try {
+                Application.Run(new ClaudeMonitor());
+            } catch (Exception ex) {
+                Log("FATAL: " + ex.ToString());
+            }
+            GC.KeepAlive(mutex);
+        } catch (Exception ex) {
+            Log("Mutex/startup error: " + ex.ToString());
+        }
     }
 
     // ── Constructor ─────────────────────────────────────
     ClaudeMonitor() {
+        Log("Constructor start");
         claudeDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude");
         json = new JavaScriptSerializer();
         prevStates = new Dictionary<string, string>();
@@ -70,6 +119,7 @@ class ClaudeMonitor : ApplicationContext {
         credentialsPath = Path.Combine(claudeDir, ".credentials.json");
 
         LoadSessionNames();
+        Log("Session names loaded");
 
         tray = new NotifyIcon();
         tray.Icon = MakeDiamond(Color.FromArgb(100, 100, 140), false);
@@ -77,6 +127,12 @@ class ClaudeMonitor : ApplicationContext {
         tray.Visible = true;
         tray.MouseClick += new MouseEventHandler(OnTrayClick);
         tray.ContextMenuStrip = new ContextMenuStrip();
+        Log("Tray icon created");
+
+        // Show a startup balloon so user knows it launched
+        try {
+            tray.ShowBalloonTip(3000, "Claude Monitor", "Running in system tray", ToolTipIcon.Info);
+        } catch {}
 
         timer = new System.Windows.Forms.Timer();
         timer.Interval = 8000;
@@ -92,13 +148,16 @@ class ClaudeMonitor : ApplicationContext {
         // Run cleanup once on startup
         CleanupStaleFiles();
 
-        // Create overlay form on UI thread (starts hidden)
+        // Create overlay form on UI thread (visible by default)
+        Log("Creating overlay");
         overlay = new OverlayForm();
         overlay.OverlayClicked += new EventHandler(delegate(object sender2, EventArgs e2) {
             ShowMenu();
         });
 
+        Log("Running first refresh");
         DoRefresh();
+        Log("Constructor done, entering message loop");
     }
 
     void OnTrayClick(object sender, MouseEventArgs e) {
@@ -1256,7 +1315,9 @@ class ClaudeMonitor : ApplicationContext {
             this.TopMost = true;
             this.ShowInTaskbar = false;
             this.StartPosition = FormStartPosition.Manual;
-            this.BackColor = Color.FromArgb(220, 20, 20, 32);
+            // WinForms doesn't support alpha on BackColor — use opaque dark
+            this.BackColor = Color.FromArgb(20, 20, 32);
+            this.Opacity = 0.92;
             this.Size = new Size(300, 100);
             this.closeRect = new Rectangle(275, 5, 18, 18);
 
@@ -1268,13 +1329,17 @@ class ClaudeMonitor : ApplicationContext {
             this.SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
 
             // Rounded corners via Region
-            GraphicsPath path = new GraphicsPath();
-            path.AddArc(0, 0, 24, 24, 180, 90);
-            path.AddArc(this.Width - 24, 0, 24, 24, 270, 90);
-            path.AddArc(this.Width - 24, this.Height - 24, 24, 24, 0, 90);
-            path.AddArc(0, this.Height - 24, 24, 24, 90, 90);
-            path.CloseFigure();
-            this.Region = new Region(path);
+            try {
+                GraphicsPath path = new GraphicsPath();
+                path.AddArc(0, 0, 24, 24, 180, 90);
+                path.AddArc(this.Width - 24, 0, 24, 24, 270, 90);
+                path.AddArc(this.Width - 24, this.Height - 24, 24, 24, 0, 90);
+                path.AddArc(0, this.Height - 24, 24, 24, 90, 90);
+                path.CloseFigure();
+                this.Region = new Region(path);
+            } catch {
+                // Fall back to rectangular shape if Region fails
+            }
 
             // Init colors
             line2Color = Color.FromArgb(80, 180, 110);

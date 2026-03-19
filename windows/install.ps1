@@ -326,8 +326,29 @@ start "" "$exeDst"
     Write-Ok "Launcher created: $launcher"
 
     # Launch the compiled app
-    Start-Process -FilePath $exeDst -WindowStyle Hidden
-    Write-Ok "Claude Monitor is running in your system tray"
+    Write-Info "Launching tray app..."
+    Start-Process -FilePath $exeDst
+    Start-Sleep -Seconds 2
+
+    # Verify it's actually running
+    $running = Get-Process "ClaudeMonitor" -ErrorAction SilentlyContinue
+    if ($running) {
+        Write-Ok "Claude Monitor is running (PID $($running.Id))"
+        Write-Host ""
+        Write-Host "  Look for the diamond icon in your system tray (bottom-right)." -ForegroundColor Cyan
+        Write-Host "  If you don't see it, click the ^ arrow to find hidden icons." -ForegroundColor Cyan
+        Write-Host "  A floating overlay widget should also appear in the top-right corner." -ForegroundColor Cyan
+    } else {
+        Write-Err "ClaudeMonitor.exe did not start!"
+        Write-Warn "Check the log at: $ClaudeDir\.monitor_log"
+        # Show log if it exists
+        $logPath = Join-Path $ClaudeDir ".monitor_log"
+        if (Test-Path $logPath) {
+            Write-Host ""
+            Write-Host "  Log contents:" -ForegroundColor Yellow
+            Get-Content $logPath -Tail 10 | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+        }
+    }
 }
 
 # -- Execute -----------------------------------------------
