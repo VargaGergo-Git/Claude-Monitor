@@ -9,9 +9,12 @@ $ErrorActionPreference = "SilentlyContinue"
 # PS 5.1 defaults to the OEM code page which corrupts them.
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
+# Read stdin as UTF-8. PS 5.1 defaults to OEM code page (CP852 for
+# Hungarian), which garbles Unicode chars in the JSON that Claude Code sends.
 $InputData = ""
 if ([Console]::IsInputRedirected) {
-    $InputData = [Console]::In.ReadToEnd()
+    $reader = New-Object System.IO.StreamReader([Console]::OpenStandardInput(), [System.Text.Encoding]::UTF8)
+    $InputData = $reader.ReadToEnd()
 }
 $json = $InputData | ConvertFrom-Json
 if (-not $json) { exit }

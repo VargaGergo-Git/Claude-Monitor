@@ -8,7 +8,8 @@ $ErrorActionPreference = 'SilentlyContinue'
 # doesn't pipe data to this hook event
 $InputData = ""
 if ([Console]::IsInputRedirected) {
-    $InputData = [Console]::In.ReadToEnd()
+    $reader = New-Object System.IO.StreamReader([Console]::OpenStandardInput(), [System.Text.Encoding]::UTF8)
+    $InputData = $reader.ReadToEnd()
 }
 
 $json = $InputData | ConvertFrom-Json -ErrorAction SilentlyContinue

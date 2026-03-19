@@ -4,7 +4,8 @@
 
 $ErrorActionPreference = 'SilentlyContinue'
 
-$InputData = [Console]::In.ReadToEnd()
+$reader = New-Object System.IO.StreamReader([Console]::OpenStandardInput(), [System.Text.Encoding]::UTF8)
+$InputData = $reader.ReadToEnd()
 $json = $InputData | ConvertFrom-Json -ErrorAction SilentlyContinue
 if (-not $json) { exit }
 
