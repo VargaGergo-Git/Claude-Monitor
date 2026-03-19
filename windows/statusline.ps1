@@ -275,7 +275,13 @@ if ($AgentCount -gt 0) {
 
 # -- Output to STDOUT (not Write-Host!) -----------------------
 # Claude Code reads stdout from statusLine commands.
-# Write-Host goes to console directly and is invisible to Claude Code.
-[Console]::Out.WriteLine($L1)
-[Console]::Out.WriteLine($L2)
-if ($AgentLine) { [Console]::Out.WriteLine($AgentLine) }
+# Use a StreamWriter with explicit UTF-8 encoding -- PS 5.1's
+# [Console]::OutputEncoding doesn't reliably override the pipe encoding,
+# and the OEM code page (CP852 for Hungarian) garbles Unicode chars.
+$utf8 = New-Object System.Text.UTF8Encoding $false
+$writer = New-Object System.IO.StreamWriter([Console]::OpenStandardOutput(), $utf8)
+$writer.AutoFlush = $true
+$writer.WriteLine($L1)
+$writer.WriteLine($L2)
+if ($AgentLine) { $writer.WriteLine($AgentLine) }
+$writer.Flush()
