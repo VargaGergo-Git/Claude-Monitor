@@ -1,4 +1,4 @@
-# Claude Monitor — Windows System Tray App
+# Claude Monitor -- Windows System Tray App
 # Monitors Claude Code sessions and shows status in the system tray
 # Requires: Windows 10+, PowerShell 5.1+
 # Usage: powershell -ExecutionPolicy Bypass -File tray-app.ps1
@@ -12,7 +12,7 @@ $script:NameCache = @{}
 $script:PrevStates = @{}
 $script:CtxWarned = [System.Collections.Generic.HashSet[string]]::new()
 
-# ── Settings (persisted in registry) ────────────────────────
+# -- Settings (persisted in registry) ------------------------
 $script:RegPath = "HKCU:\Software\ClaudeMonitor"
 if (-not (Test-Path $script:RegPath)) { New-Item -Path $script:RegPath -Force | Out-Null }
 
@@ -38,7 +38,7 @@ $script:PendingCtx = [System.Collections.Generic.HashSet[string]]::new()
 $script:HaikuCallCount = [int](Get-Setting "HaikuCalls" 0)
 $script:HaikuTokensUsed = [int](Get-Setting "HaikuTokens" 0)
 
-# ── Windows Credential Manager (P/Invoke) ────────────────────
+# -- Windows Credential Manager (P/Invoke) --------------------
 try {
     Add-Type -TypeDefinition @"
 using System;
@@ -71,7 +71,7 @@ public class WinCred {
 "@ -ErrorAction SilentlyContinue
 } catch {}
 
-# ── Toast Notifications ─────────────────────────────────────
+# -- Toast Notifications -------------------------------------
 function Show-Notification($Title, $Body) {
     $script:TrayIcon.BalloonTipTitle = $Title
     $script:TrayIcon.BalloonTipText = $Body
@@ -79,7 +79,7 @@ function Show-Notification($Title, $Body) {
     $script:TrayIcon.ShowBalloonTip(5000)
 }
 
-# ── Name Cache ──────────────────────────────────────────────
+# -- Name Cache ----------------------------------------------
 function Load-NameCache {
     $path = Join-Path $script:ClaudeDir ".session_names"
     if (Test-Path $path) {
@@ -98,7 +98,7 @@ function Save-NameToCache($sid, $name) {
     Add-Content -Path $path -Value "$sid|$name" -ErrorAction SilentlyContinue
 }
 
-# ── Haiku API ────────────────────────────────────────────────
+# -- Haiku API ------------------------------------------------
 function Get-OAuthToken {
     if ($script:CachedToken) { return $script:CachedToken }
     try {
@@ -226,7 +226,7 @@ function Resolve-SmartContexts {
     }
 }
 
-# ── Cleanup stale files ────────────────────────────────────
+# -- Cleanup stale files ------------------------------------
 function Cleanup-StaleFiles {
     $prefixes = @(".ctx_", ".state_", ".ctxlog_", ".tty_map_", ".tty_resolved_", ".activity_", ".files_", ".ctx_pct_")
     $cutoff = (Get-Date).AddHours(-24)
@@ -242,11 +242,11 @@ function Cleanup-StaleFiles {
     }
 }
 
-# ── Scan for Claude sessions ───────────────────────────────
+# -- Scan for Claude sessions -------------------------------
 function Scan-Sessions {
     $results = @()
 
-    # Find claude processes — works for both native and WSL
+    # Find claude processes -- works for both native and WSL
     $claudeProcesses = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -match "^(claude|node)\.exe$" -and $_.CommandLine -match "claude" } |
         Select-Object ProcessId, CommandLine, CreationDate
@@ -370,7 +370,7 @@ function Scan-Sessions {
     Check-Notifications
 }
 
-# ── Check notifications ────────────────────────────────────
+# -- Check notifications ------------------------------------
 function Check-Notifications {
     foreach ($session in $script:Sessions) {
         $sid = $session.Sid
@@ -387,14 +387,14 @@ function Check-Notifications {
         if ($script:NotifyContext -and $session.ContextPct -ge 80 -and -not $script:CtxWarned.Contains($sid)) {
             $script:CtxWarned.Add($sid) | Out-Null
             $name = if ($session.Name) { $session.Name } else { $session.Project }
-            Show-Notification "$name — Context $($session.ContextPct)%" "Consider running /compact to free up space"
+            Show-Notification "$name -- Context $($session.ContextPct)%" "Consider running /compact to free up space"
         }
 
         $script:PrevStates[$sid] = $curr
     }
 }
 
-# ── Build context menu ─────────────────────────────────────
+# -- Build context menu -------------------------------------
 function Build-Menu {
     $menu = New-Object System.Windows.Forms.ContextMenuStrip
     $menu.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 40)
@@ -428,7 +428,7 @@ function Build-Menu {
 
             # Branch warning
             if ($group.Count -gt 1) {
-                $warn = $menu.Items.Add("  ⚠ $($group.Count) sessions sharing one branch")
+                $warn = $menu.Items.Add("  ! $($group.Count) sessions sharing one branch")
                 $warn.Enabled = $false
                 $warn.ForeColor = [System.Drawing.Color]::FromArgb(255, 190, 70)
             }
@@ -438,7 +438,7 @@ function Build-Menu {
                 $info = ""
                 if ($first.ModifiedFiles -gt 0) { $info = "  $($first.ModifiedFiles) changed" }
                 if ($first.LastCommit) {
-                    $info += if ($info) { " · $($first.LastCommit)" } else { "  $($first.LastCommit)" }
+                    $info += if ($info) { " . $($first.LastCommit)" } else { "  $($first.LastCommit)" }
                 }
                 $gitItem = $menu.Items.Add($info)
                 $gitItem.Enabled = $false
@@ -455,9 +455,9 @@ function Build-Menu {
 
                 # State indicator
                 $dot = switch ($session.State) {
-                    "active"  { "● " }
-                    "waiting" { "● " }
-                    default   { "○ " }
+                    "active"  { "* " }
+                    "waiting" { "* " }
+                    default   { "o " }
                 }
 
                 $label = "  $dot$displayName  $($session.Duration)"
@@ -475,7 +475,7 @@ function Build-Menu {
                 }
                 $sessionItem.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
 
-                # Context line — prefer Haiku smart context, then raw context
+                # Context line -- prefer Haiku smart context, then raw context
                 $ctxText = if ($session.SmartContext) { $session.SmartContext }
                     elseif ($session.Context) { $session.Context }
                     elseif ($session.State -eq "waiting") { "Waiting for your input" }
@@ -491,7 +491,7 @@ function Build-Menu {
         }
     }
 
-    # ── Usage section ──────────────────────────────────────
+    # -- Usage section --------------------------------------
     $usageCache = Join-Path $script:ClaudeDir ".usage_cache.json"
     if (Test-Path $usageCache) {
         try {
@@ -525,7 +525,7 @@ function Build-Menu {
 
     $menu.Items.Add("-") | Out-Null
 
-    # ── Settings ───────────────────────────────────────────
+    # -- Settings -------------------------------------------
     $refreshItem = $menu.Items.Add("Refresh")
     $refreshItem.Add_Click({ Scan-Sessions; Build-Menu })
 
@@ -591,11 +591,11 @@ function Build-Menu {
     $script:TrayIcon.ContextMenuStrip = $menu
 }
 
-# ── Helpers ─────────────────────────────────────────────────
+# -- Helpers -------------------------------------------------
 function Make-Bar($pct, $width) {
     $filled = [int]($pct * $width / 100)
     if ($filled -gt $width) { $filled = $width }
-    $bar = ("█" * $filled) + ("░" * ($width - $filled))
+    $bar = ("#" * $filled) + ("-" * ($width - $filled))
     return $bar
 }
 
@@ -605,7 +605,7 @@ function Get-UsageColor($pct) {
     return [System.Drawing.Color]::FromArgb(80, 180, 110)
 }
 
-# ── Create tray icon ───────────────────────────────────────
+# -- Create tray icon ---------------------------------------
 # Draw a simple diamond icon
 $bitmap = New-Object System.Drawing.Bitmap(16, 16)
 $g = [System.Drawing.Graphics]::FromImage($bitmap)
@@ -636,7 +636,7 @@ $script:TrayIcon.Add_Click({
     }
 })
 
-# ── Initial scan and timers ─────────────────────────────────
+# -- Initial scan and timers ---------------------------------
 # Ensure ~/.claude/ exists (works even before first Claude Code session)
 New-Item -ItemType Directory -Path $script:ClaudeDir -Force -ErrorAction SilentlyContinue | Out-Null
 Cleanup-StaleFiles

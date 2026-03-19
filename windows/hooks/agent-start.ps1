@@ -1,4 +1,4 @@
-# Track active agents — increment count + log description
+# Track active agents -- increment count + log description
 # Hook type: SubagentStart
 # PowerShell version for native Windows Claude Code
 

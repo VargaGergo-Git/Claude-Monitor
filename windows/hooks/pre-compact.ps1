@@ -1,4 +1,4 @@
-# Pre-Compact — remind to preserve key context before compression
+# Pre-Compact -- remind to preserve key context before compression
 # Hook type: PreCompact
 # PowerShell version for native Windows Claude Code
 

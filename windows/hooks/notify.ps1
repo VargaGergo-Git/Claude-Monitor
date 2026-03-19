@@ -1,4 +1,4 @@
-# Notification hook — Windows toast notifications
+# Notification hook -- Windows toast notifications
 # Hook type: Notification
 # PowerShell version for native Windows Claude Code
 
@@ -12,9 +12,9 @@ $Dir = if ($json.cwd) { $json.cwd } else { "" }
 $Proj = if ($Dir) { Split-Path $Dir -Leaf } else { "Claude Code" }
 
 $Title = switch ($Type) {
-    "permission_prompt" { "$Proj — Needs Approval" }
-    "idle_prompt"       { "$Proj — Ready" }
-    "auth_success"      { "$Proj — Authenticated" }
+    "permission_prompt" { "$Proj -- Needs Approval" }
+    "idle_prompt"       { "$Proj -- Ready" }
+    "auth_success"      { "$Proj -- Authenticated" }
     default             { $Proj }
 }
 

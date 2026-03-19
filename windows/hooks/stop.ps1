@@ -1,4 +1,4 @@
-# Stop hook — mark session as waiting + auto-handoff
+# Stop hook -- mark session as waiting + auto-handoff
 # Hook type: Stop
 # PowerShell version for native Windows Claude Code
 
@@ -10,7 +10,7 @@ $Dir = $json.cwd
 $SessionId = $json.session_id
 $claudeDir = Join-Path $env:USERPROFILE ".claude"
 
-# ── Session tracking ──────────────────────────────────────
+# -- Session tracking --------------------------------------
 $sessionsFile = Join-Path $claudeDir ".sessions.json"
 if ($SessionId -and (Test-Path $sessionsFile)) {
     try {
@@ -23,7 +23,7 @@ if ($SessionId -and (Test-Path $sessionsFile)) {
     } catch {}
 }
 
-# ── Mark session as WAITING ───────────────────────────────
+# -- Mark session as WAITING -------------------------------
 if ($SessionId) {
     Set-Content -Path (Join-Path $claudeDir ".state_$SessionId") -Value "waiting" -NoNewline -ErrorAction SilentlyContinue
 
@@ -33,7 +33,7 @@ if ($SessionId) {
     }
 }
 
-# ── Auto-handoff: save dirty state ───────────────────────
+# -- Auto-handoff: save dirty state -----------------------
 if (-not $Dir) { exit }
 
 try {

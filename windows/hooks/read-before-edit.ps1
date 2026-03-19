@@ -23,7 +23,7 @@ if (-not $wasRead) {
     @{
         hookSpecificOutput = @{
             hookEventName = "PreToolUse"
-            additionalContext = "Editing $fname without reading it first — make sure you understand the full context."
+            additionalContext = "Editing $fname without reading it first -- make sure you understand the full context."
         }
     } | ConvertTo-Json -Compress -Depth 3
 }

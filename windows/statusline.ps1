@@ -1,4 +1,4 @@
-# Claude Code Status Line — Windows PowerShell version
+# Claude Code Status Line -- Windows PowerShell version
 # Rich terminal status bar with usage tracking
 #
 # Add to your ~/.claude/settings.json:
@@ -9,10 +9,10 @@ $InputData = $input | Out-String
 $json = $InputData | ConvertFrom-Json
 if (-not $json) { exit }
 
-# ── ESC character (works in PowerShell 5.1+) ────────────────
+# -- ESC character (works in PowerShell 5.1+) ----------------
 $e = [char]27
 
-# ── Parse ───────────────────────────────────────────────────
+# -- Parse ---------------------------------------------------
 $Model = if ($json.model.display_name) { $json.model.display_name } else { "Claude" }
 $SettingsPath = Join-Path $env:USERPROFILE ".claude\settings.json"
 $Effort = "default"
@@ -26,7 +26,7 @@ $Pct = [int]($json.context_window.used_percentage -replace '\..*', '')
 $Dir = $json.workspace.current_dir
 $Proj = if ($Dir) { Split-Path $Dir -Leaf } else { "" }
 
-# ── Git ─────────────────────────────────────────────────────
+# -- Git -----------------------------------------------------
 $Branch = ""
 $Dirty = 0
 if ($Dir -and (Test-Path $Dir)) {
@@ -36,7 +36,7 @@ if ($Dir -and (Test-Path $Dir)) {
     Pop-Location
 }
 
-# ── Fetch plan usage (cached 5min) ──────────────────────────
+# -- Fetch plan usage (cached 5min) --------------------------
 $Cache = Join-Path $env:USERPROFILE ".claude\.usage_cache.json"
 $CacheAge = 999
 if (Test-Path $Cache) {
@@ -97,7 +97,7 @@ public class WinCredSL {
     }
 }
 
-# ── Parse usage ─────────────────────────────────────────────
+# -- Parse usage ---------------------------------------------
 $SessionPct = 0; $WeeklyPct = 0
 $SessReset = ""; $WeekReset = ""; $WeekDelta = 0
 
@@ -132,7 +132,7 @@ if (Test-Path $Cache) {
     }
 }
 
-# ── ANSI Palette (using $e = [char]27 for PS 5.1 compat) ────
+# -- ANSI Palette (using $e = [char]27 for PS 5.1 compat) ----
 $R = "$e[0m"; $B = "$e[1m"
 $FG_BRAND    = "$e[38;2;255;150;70m"
 $FG_MODEL    = "$e[38;2;200;195;185m"
@@ -158,7 +158,7 @@ $FG_AGDESC   = "$e[38;2;130;110;180m"
 $BG_BAR      = "$e[48;2;18;18;26m"
 $SEP = "${FG_SEP} | ${R}${BG_BAR}"
 
-# ── Helpers ─────────────────────────────────────────────────
+# -- Helpers -------------------------------------------------
 function Pick-UsageFg($p, $labelColor) {
     if ($p -ge 80) { return $FG_HOT }
     if ($p -ge 50) { return $FG_MID }
@@ -168,12 +168,12 @@ function Pick-UsageFg($p, $labelColor) {
 function Make-Bar($p, $n, $fg) {
     $f = [int]($p * $n / 100)
     if ($f -gt $n) { $f = $n }
-    $filled = [string]::new([char]0x2501, $f)    # heavy horizontal ━
-    $empty  = [string]::new([char]0x2500, $n - $f)  # light horizontal ─
+    $filled = [string]::new([char]0x2501, $f)    # heavy horizontal =
+    $empty  = [string]::new([char]0x2500, $n - $f)  # light horizontal -
     return "${fg}${filled}${FG_MUTED}${empty}"
 }
 
-# ── Effort ──────────────────────────────────────────────────
+# -- Effort --------------------------------------------------
 $EffFg = $FG_DIM; $EffLabel = ""
 switch ($Effort) {
     { $_ -in "low","min" }   { $EffFg = $FG_EFF_LO;  $EffLabel = "Low" }
@@ -181,7 +181,7 @@ switch ($Effort) {
     "medium"                 { $EffFg = $FG_EFF_MED; $EffLabel = "Medium" }
 }
 
-# ── Line 1: Project + Model + Git + Context ─────────────────
+# -- Line 1: Project + Model + Git + Context -----------------
 $L1 = "${BG_BAR} "
 $L1 += "${FG_BRAND}${B}$([char]0x25C6)${R}${BG_BAR} ${FG_PROJ}${B}${Proj}${R}${BG_BAR} ${FG_DIM}$([char]0xB7)${R}${BG_BAR} ${FG_MODEL}${Model}${R}${BG_BAR}"
 
@@ -203,7 +203,7 @@ if ($Fast) {
 }
 $L1 += " ${R}"
 
-# ── Line 2: Session + Weekly usage ──────────────────────────
+# -- Line 2: Session + Weekly usage --------------------------
 $L2 = "${BG_BAR} "
 
 $sessFg = Pick-UsageFg $SessionPct $FG_SESS
@@ -226,7 +226,7 @@ if (Test-Path $Cache) {
 }
 $L2 += " ${R}"
 
-# ── Active Agents line ──────────────────────────────────────
+# -- Active Agents line --------------------------------------
 $AgentLine = ""
 $AgentsFile = Join-Path $env:USERPROFILE ".claude\.agent_activity"
 $AgentCount = 0
@@ -251,7 +251,7 @@ if ($AgentCount -gt 0) {
     $AgentLine += " ${R}"
 }
 
-# ── Output to STDOUT (not Write-Host!) ───────────────────────
+# -- Output to STDOUT (not Write-Host!) -----------------------
 # Claude Code reads stdout from statusLine commands.
 # Write-Host goes to console directly and is invisible to Claude Code.
 [Console]::Out.WriteLine($L1)

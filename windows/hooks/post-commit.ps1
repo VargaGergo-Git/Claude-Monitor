@@ -1,4 +1,4 @@
-# Post-commit celebration — notify what was shipped
+# Post-commit celebration -- notify what was shipped
 # Hook type: PostToolUse (matcher: Bash)
 # PowerShell version for native Windows Claude Code
 
@@ -21,7 +21,7 @@ try {
     Pop-Location
 
     if ($subject) {
-        $msg = "Shipped: `"$subject`" — $files files on $branch"
+        $msg = "Shipped: `"$subject`" -- $files files on $branch"
 
         # Toast notification
         Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue

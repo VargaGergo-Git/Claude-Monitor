@@ -1,4 +1,4 @@
-# Claude Monitor — Windows Installer
+# Claude Monitor -- Windows Installer
 # Usage: powershell -ExecutionPolicy Bypass -File install.ps1
 #        powershell -ExecutionPolicy Bypass -File install.ps1 -Mode hooks
 #        powershell -ExecutionPolicy Bypass -File install.ps1 -Mode app
@@ -20,10 +20,10 @@ function Write-Err($msg)   { Write-Host "[X] " -ForegroundColor Red -NoNewline; 
 
 Write-Host ""
 Write-Host "Claude Monitor" -ForegroundColor White -NoNewline
-Write-Host " — System tray app + hooks for Claude Code" -ForegroundColor Gray
+Write-Host " -- System tray app + hooks for Claude Code" -ForegroundColor Gray
 Write-Host ""
 
-# ── Prerequisites ─────────────────────────────────────────
+# -- Prerequisites -----------------------------------------
 if (-not (Get-Command "jq" -ErrorAction SilentlyContinue)) {
     Write-Warn "jq not found. Some hooks use jq for JSON parsing."
     Write-Warn "Install with: winget install jqlang.jq"
@@ -34,7 +34,7 @@ if (-not (Get-Command "jq" -ErrorAction SilentlyContinue)) {
 New-Item -ItemType Directory -Path $ClaudeDir -Force | Out-Null
 New-Item -ItemType Directory -Path $HooksDir -Force | Out-Null
 
-# ── Install hooks ─────────────────────────────────────────
+# -- Install hooks -----------------------------------------
 function Install-Hooks {
     Write-Info "Installing PowerShell hooks to $HooksDir..."
 
@@ -80,7 +80,7 @@ function Install-Hooks {
     Write-Ok "Hooks: $installed installed, $skipped already up-to-date"
 }
 
-# ── Install statusline ───────────────────────────────────
+# -- Install statusline -----------------------------------
 function Install-Statusline {
     Write-Info "Installing statusline..."
 
@@ -88,7 +88,7 @@ function Install-Statusline {
     $dst = Join-Path $ClaudeDir "statusline.ps1"
 
     if (-not (Test-Path $src)) {
-        Write-Warn "statusline.ps1 not found — skipping"
+        Write-Warn "statusline.ps1 not found -- skipping"
         return
     }
 
@@ -106,13 +106,13 @@ function Install-Statusline {
     Write-Ok "Statusline installed"
 }
 
-# ── Configure settings.json ──────────────────────────────
+# -- Configure settings.json ------------------------------
 function Configure-Settings {
     Write-Info "Configuring settings.json..."
 
     $templatePath = Join-Path $ScriptDir "settings-template.json"
     if (-not (Test-Path $templatePath)) {
-        Write-Warn "settings-template.json not found — skipping settings configuration"
+        Write-Warn "settings-template.json not found -- skipping settings configuration"
         return
     }
 
@@ -128,26 +128,44 @@ function Configure-Settings {
     }
 
     # Check if hooks already configured
-    $existing = Get-Content $Settings -Raw | ConvertFrom-Json
+    $existing = $null
+    try {
+        $raw = Get-Content $Settings -Raw -ErrorAction Stop
+        if ($raw) { $existing = $raw | ConvertFrom-Json }
+    } catch {}
+
+    if (-not $existing) {
+        # settings.json is empty or invalid -- create from template
+        $template = Get-Content $templatePath -Raw | ConvertFrom-Json
+        $template.PSObject.Properties.Remove('_comment')
+        $template.PSObject.Properties.Remove('_instructions')
+        $template | ConvertTo-Json -Depth 10 | Set-Content $Settings
+        Write-Ok "Created settings.json from template (previous file was empty/invalid)"
+        return
+    }
+
     if ($existing.hooks) {
-        Write-Warn "Hooks already configured in settings.json — not overwriting"
+        Write-Warn "Hooks already configured in settings.json -- not overwriting"
         Write-Warn "Compare with windows/settings-template.json to see what's new"
         return
     }
 
-    # Merge hooks into existing settings
+    # Merge hooks + statusLine into existing settings
     $backup = "$Settings.pre-monitor-backup"
     Copy-Item $Settings $backup -Force
 
     $template = Get-Content $templatePath -Raw | ConvertFrom-Json
     $existing | Add-Member -NotePropertyName "hooks" -NotePropertyValue $template.hooks -Force
+    if ($template.statusLine) {
+        $existing | Add-Member -NotePropertyName "statusLine" -NotePropertyValue $template.statusLine -Force
+    }
     $existing | ConvertTo-Json -Depth 10 | Set-Content $Settings
 
-    Write-Ok "Merged hooks into existing settings.json"
+    Write-Ok "Merged hooks + statusline into settings.json"
     Write-Ok "Backup saved to $backup"
 }
 
-# ── Install tray app ─────────────────────────────────────
+# -- Install tray app -------------------------------------
 function Install-App {
     Write-Info "Installing Claude Monitor tray app..."
 
@@ -176,7 +194,7 @@ start /min powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File "%USERPR
     Write-Ok "Claude Monitor is running in your system tray"
 }
 
-# ── Execute ───────────────────────────────────────────────
+# -- Execute -----------------------------------------------
 switch ($Mode) {
     "full" {
         Install-Hooks

@@ -1,4 +1,4 @@
-# Claude Code Insights — human-friendly narration of what Claude is doing
+# Claude Code Insights -- human-friendly narration of what Claude is doing
 # Hook type: PreToolUse
 # PowerShell version for native Windows Claude Code
 
@@ -10,12 +10,12 @@ $Tool = $json.tool_name
 $SessionId = $json.session_id
 $msg = ""
 
-# ── Helper: get tool input field ─────────────────────────
+# -- Helper: get tool input field -------------------------
 function Get-Field($name) {
     try { $json.tool_input.$name } catch { "" }
 }
 
-# ── File descriptions ────────────────────────────────────
+# -- File descriptions ------------------------------------
 function Describe-File($f) {
     switch -Wildcard ($f) {
         "*CLAUDE.md"         { "project rules" }
@@ -39,7 +39,7 @@ function Describe-File($f) {
     }
 }
 
-# ── Main dispatch ────────────────────────────────────────
+# -- Main dispatch ----------------------------------------
 switch ($Tool) {
     "Read" {
         $file = Get-Field "file_path"
@@ -151,7 +151,7 @@ switch ($Tool) {
     }
 }
 
-# ── Write state files for Claude Monitor ─────────────────
+# -- Write state files for Claude Monitor -----------------
 if ($SessionId) {
     $claudeDir = Join-Path $env:USERPROFILE ".claude"
 
@@ -186,7 +186,7 @@ if ($SessionId) {
     }
 }
 
-# ── Output ───────────────────────────────────────────────
+# -- Output -----------------------------------------------
 if ($msg) {
     @{ systemMessage = $msg } | ConvertTo-Json -Compress
 }

@@ -1,4 +1,4 @@
-# Track active agents — decrement count
+# Track active agents -- decrement count
 # Hook type: SubagentStop
 # PowerShell version for native Windows Claude Code
 

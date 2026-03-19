@@ -1,4 +1,4 @@
-# Claude Monitor — Windows Uninstaller
+# Claude Monitor -- Windows Uninstaller
 param([switch]$Force)
 
 $ClaudeDir = Join-Path $env:USERPROFILE ".claude"
@@ -9,10 +9,10 @@ function Write-Warn($msg) { Write-Host "[!] " -ForegroundColor Yellow -NoNewline
 function Write-Info($msg)  { Write-Host "=> " -ForegroundColor Cyan -NoNewline; Write-Host $msg }
 
 Write-Host ""
-Write-Host "Claude Monitor — Uninstall" -ForegroundColor White
+Write-Host "Claude Monitor -- Uninstall" -ForegroundColor White
 Write-Host ""
 
-# ── Stop tray app ─────────────────────────────────────────
+# -- Stop tray app -----------------------------------------
 $procs = Get-Process -Name "powershell" -ErrorAction SilentlyContinue |
     Where-Object { $_.CommandLine -match "tray-app\.ps1" }
 if ($procs) {
@@ -20,20 +20,20 @@ if ($procs) {
     Write-Ok "Stopped Claude Monitor tray app"
 }
 
-# ── Remove startup shortcut ───────────────────────────────
+# -- Remove startup shortcut -------------------------------
 $startupLnk = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup\ClaudeMonitor.lnk"
 if (Test-Path $startupLnk) {
     Remove-Item $startupLnk -Force
     Write-Ok "Removed startup shortcut"
 }
 
-# ── Remove tray app + launcher ────────────────────────────
+# -- Remove tray app + launcher ----------------------------
 $trayApp = Join-Path $ClaudeDir "tray-app.ps1"
 $launcher = Join-Path $ClaudeDir "ClaudeMonitor.bat"
 if (Test-Path $trayApp) { Remove-Item $trayApp -Force; Write-Ok "Removed tray-app.ps1" }
 if (Test-Path $launcher) { Remove-Item $launcher -Force; Write-Ok "Removed ClaudeMonitor.bat" }
 
-# ── Remove hooks ─────────────────────────────────────────
+# -- Remove hooks -----------------------------------------
 $hooks = @(
     "insights.ps1", "session-start.ps1", "stop.ps1", "notify.ps1",
     "post-commit.ps1", "agent-start.ps1", "agent-stop.ps1",
@@ -51,7 +51,7 @@ foreach ($hook in $hooks) {
 }
 Write-Ok "Removed $removed hooks"
 
-# ── Clean up temp files ──────────────────────────────────
+# -- Clean up temp files ----------------------------------
 Write-Info "Cleaning up temporary files..."
 $patterns = @(".ctx_*", ".state_*", ".ctxlog_*", ".tty_map_*", ".tty_resolved_*",
               ".activity_*", ".ctx_pct_*")
@@ -68,7 +68,7 @@ foreach ($f in $singleFiles) {
 }
 Write-Ok "Cleaned up temporary files"
 
-# ── Remove registry settings ─────────────────────────────
+# -- Remove registry settings -----------------------------
 $regPath = "HKCU:\Software\ClaudeMonitor"
 if (Test-Path $regPath) {
     Remove-Item $regPath -Recurse -Force

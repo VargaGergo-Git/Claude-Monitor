@@ -1,4 +1,4 @@
-# Session Start — session tracking for Claude Monitor
+# Session Start -- session tracking for Claude Monitor
 # Hook type: SessionStart
 # PowerShell version for native Windows Claude Code
 
@@ -17,7 +17,7 @@ Set-Content -Path (Join-Path $claudeDir ".files_read") -Value "" -ErrorAction Si
 Set-Content -Path (Join-Path $claudeDir ".active_agents") -Value "0" -ErrorAction SilentlyContinue
 Set-Content -Path (Join-Path $claudeDir ".agent_activity") -Value "" -ErrorAction SilentlyContinue
 
-# ── Session tracking ──────────────────────────────────────
+# -- Session tracking --------------------------------------
 $sessionsFile = Join-Path $claudeDir ".sessions.json"
 if (-not (Test-Path $sessionsFile)) {
     Set-Content -Path $sessionsFile -Value "[]"
@@ -57,13 +57,13 @@ if ($SessionId) {
     } catch {}
 }
 
-# ── Build output ──────────────────────────────────────────
+# -- Build output ------------------------------------------
 $msg = ""
 
 # Handoff notes
 $handoff = Join-Path $Dir ".claude\handoff.md"
 if (Test-Path $handoff) {
-    $msg = "Handoff notes from last session — read .claude/handoff.md to pick up where you left off."
+    $msg = "Handoff notes from last session -- read .claude/handoff.md to pick up where you left off."
 }
 
 # Git status
@@ -75,7 +75,7 @@ try {
 
     if ($branch) {
         $gitMsg = "Branch: $branch"
-        if ($dirty -gt 0) { $gitMsg += " — $dirty uncommitted changes" }
+        if ($dirty -gt 0) { $gitMsg += " -- $dirty uncommitted changes" }
         $msg = if ($msg) { "$msg`n$gitMsg" } else { $gitMsg }
     }
 } catch { Pop-Location }
