@@ -8,6 +8,7 @@ APP_DIR="$HOME/.claude/ClaudeMonitor.app"
 echo "Building Claude Monitor..."
 swiftc -o "$SCRIPT_DIR/ClaudeMonitor" "$SCRIPT_DIR/Sources/main.swift" \
     -framework AppKit \
+    -framework UserNotifications \
     -O \
     -target arm64-apple-macosx14.0 \
     2>&1

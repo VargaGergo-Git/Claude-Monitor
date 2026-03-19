@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import UserNotifications
 
 struct Session {
     var pid, project, branch, dir, duration, tty, lastCommit, context, name, sid: String
@@ -47,7 +48,7 @@ class VelocityTracker {
 
 // MARK: - Monitor
 
-class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate {
+class Monitor: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
 
     // MARK: - State
 
@@ -100,7 +101,8 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
         try? FileManager.default.createDirectory(atPath: "\(home)/.claude", withIntermediateDirectories: true)
         cleanupStaleFiles(); loadNameCache()
         velocityTracker = VelocityTracker(home: home)
-        NSUserNotificationCenter.default.delegate = self
+        let nc = UNUserNotificationCenter.current(); nc.delegate = self
+        nc.requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
         scan(); build()
         Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.build() }
         Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in self?.scan(); self?.build() }
@@ -166,7 +168,7 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
                 try? FileManager.default.removeItem(atPath: "\(self.home)/.claude/.auto_branch_\(sid)")
                 try? FileManager.default.removeItem(atPath: "\(self.home)/.claude/.parent_branch_\(sid)")
                 DispatchQueue.main.async {
-                    self.sendNotification(title: "Merged", body: "\(autoBranch) \u{2192} \(parentBranch)", sound: "Glass")
+                    self.sendNotification(title: "Merged", body: "\(autoBranch) \u{2192} \(parentBranch)", playSound: true)
                     self.scan(); self.build()
                 }
             } else {
@@ -266,20 +268,28 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
         for s in sessions where !s.sid.isEmpty {
             let prev = prevStates[s.sid] ?? ""
             if notifyWaiting && prev == "active" && s.state == "waiting" {
-                sendNotification(title: s.name.isEmpty ? s.project : s.name, body: "Ready for input \u{2014} click to jump", sound: notifySound ? "Tink" : nil, tty: s.tty) }
+                sendNotification(title: s.name.isEmpty ? s.project : s.name, body: "Ready for input \u{2014} click to jump", playSound: true, tty: s.tty) }
             if notifyContext && s.contextPct >= 80 && !ctxWarned.contains(s.sid) { ctxWarned.insert(s.sid)
-                sendNotification(title: "\(s.name.isEmpty ? s.project : s.name) \u{2014} ctx \(s.contextPct)%", body: "Consider /compact", sound: notifySound ? "Submarine" : nil, tty: s.tty) }
+                sendNotification(title: "\(s.name.isEmpty ? s.project : s.name) \u{2014} ctx \(s.contextPct)%", body: "Consider /compact", playSound: true, tty: s.tty) }
             prevStates[s.sid] = s.state
         }
     }
 
-    private func sendNotification(title: String, body: String, sound: String? = "Tink", tty: String = "") {
-        let n = NSUserNotification(); n.title = title; n.informativeText = body
-        if let sn = sound { n.soundName = sn }; n.userInfo = ["tty": tty]; NSUserNotificationCenter.default.deliver(n)
+    private func sendNotification(title: String, body: String, playSound: Bool = false, tty: String = "") {
+        let content = UNMutableNotificationContent()
+        content.title = title; content.body = body
+        if playSound && notifySound { content.sound = .default }
+        content.userInfo = ["tty": tty]
+        let req = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(req)
     }
-    func userNotificationCenter(_ center: NSUserNotificationCenter, didActivate notification: NSUserNotification) {
-        if let tty = notification.userInfo?["tty"] as? String, !tty.isEmpty { jumpToSession(tty) } }
-    func userNotificationCenter(_ center: NSUserNotificationCenter, shouldPresent notification: NSUserNotification) -> Bool { true }
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
+        if let tty = response.notification.request.content.userInfo["tty"] as? String, !tty.isEmpty { jumpToSession(tty) }
+        completionHandler()
+    }
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .sound])
+    }
 
     // MARK: - Haiku
 
@@ -761,7 +771,7 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
                 typeInTerminal(tty: tty, text: "Switch to branch \(br) to avoid conflicts. Run: git checkout \(br)")
             }
         }
-        sendNotification(title: "Branches Split", body: "\(created.count) branch\(created.count != 1 ? "es" : "") created", sound: "Glass")
+        sendNotification(title: "Branches Split", body: "\(created.count) branch\(created.count != 1 ? "es" : "") created", playSound: true)
         scan(); build()
     }
 
@@ -776,7 +786,7 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
             try? "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>Label</key><string>com.claude.monitor</string><key>ProgramArguments</key><array><string>/usr/bin/open</string><string>\(home)/.claude/ClaudeMonitor.app</string></array><key>RunAtLoad</key><true/><key>StandardOutPath</key><string>/dev/null</string><key>StandardErrorPath</key><string>/dev/null</string></dict></plist>".write(toFile: pp, atomically: true, encoding: .utf8)
             let p = Process(); p.executableURL = URL(fileURLWithPath: "/bin/launchctl"); p.arguments = ["load", pp]
             p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice; try? p.run(); p.waitUntilExit()
-            sendNotification(title: "Monitor", body: "Will launch at login", sound: "Glass")
+            sendNotification(title: "Monitor", body: "Will launch at login", playSound: true)
         }; build()
     }
 
