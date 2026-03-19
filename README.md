@@ -16,7 +16,7 @@ See what every session is doing, get notified when Claude needs your input, trac
 - **Branch conflict warnings** — alerts when multiple sessions share a branch, one-click split
 - **macOS notifications** — when Claude finishes and needs your input
 - **Click to jump** — click any session to switch to its Terminal tab
-- **Wrap up sessions** — send `/done` or custom commands to any waiting session
+- **Send commands** — type and send any message or command to a waiting session from the menu
 - **Terminal tab renaming** — tabs auto-rename to match the AI-generated session name
 - **Launch at login** — toggle from the Settings menu
 

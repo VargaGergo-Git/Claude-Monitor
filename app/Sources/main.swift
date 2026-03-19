@@ -539,7 +539,7 @@ class Monitor: NSObject, NSApplicationDelegate {
             let wrap = NSMenuItem(title: "", action: #selector(wrapUpSession(_:)), keyEquivalent: "")
             wrap.target = self
             wrap.representedObject = ["tty": s.tty, "name": displayName]
-            wrap.attributedTitle = a("     \u{23FB} Wrap up", sz: 11, wt: .medium, cl: NSColor(white: 0.50, alpha: 1))
+            wrap.attributedTitle = a("     \u{23FB} Send command...", sz: 11, wt: .medium, cl: NSColor(white: 0.50, alpha: 1))
             menu.addItem(wrap)
         }
     }
@@ -550,32 +550,18 @@ class Monitor: NSObject, NSApplicationDelegate {
         let name = info["name"] ?? "this session"
 
         let alert = NSAlert()
-        alert.messageText = "Wrap up \"\(name)\"?"
-        alert.informativeText = "Choose how to end this session:"
-        alert.addButton(withTitle: "Type /done")
-        alert.addButton(withTitle: "Type custom command...")
+        alert.messageText = "Send command to \"\(name)\""
+        alert.informativeText = "Type a message or command to send to this session:"
+        alert.addButton(withTitle: "Send")
         alert.addButton(withTitle: "Cancel")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        field.placeholderString = "e.g. summarize what you did, or /compact"
+        alert.accessoryView = field
         alert.alertStyle = .informational
 
         NSApp.activate(ignoringOtherApps: true)
-        let response = alert.runModal()
-
-        switch response {
-        case .alertFirstButtonReturn:
-            typeInTerminal(tty: tty, text: "/done")
-        case .alertSecondButtonReturn:
-            let input = NSAlert()
-            input.messageText = "Type command to send"
-            input.addButton(withTitle: "Send")
-            input.addButton(withTitle: "Cancel")
-            let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
-            field.stringValue = "/done"
-            input.accessoryView = field
-            NSApp.activate(ignoringOtherApps: true)
-            if input.runModal() == .alertFirstButtonReturn {
-                typeInTerminal(tty: tty, text: field.stringValue)
-            }
-        default: return
+        if alert.runModal() == .alertFirstButtonReturn && !field.stringValue.isEmpty {
+            typeInTerminal(tty: tty, text: field.stringValue)
         }
     }
 
