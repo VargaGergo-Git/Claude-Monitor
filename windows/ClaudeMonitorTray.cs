@@ -4,6 +4,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
@@ -17,6 +18,7 @@ using System.Windows.Forms;
 class ClaudeMonitor : ApplicationContext {
     NotifyIcon tray;
     System.Windows.Forms.Timer timer;
+    System.Windows.Forms.Timer cleanupTimer;
     string claudeDir;
     JavaScriptSerializer json;
     Dictionary<string, string> prevStates;
@@ -31,6 +33,9 @@ class ClaudeMonitor : ApplicationContext {
     int haikuCallCount;
     int haikuTokensUsed;
     HashSet<string> haikuPending; // sessions currently being named
+
+    // Git info cache (dir -> GitInfo)
+    Dictionary<string, GitInfo> gitInfoCache;
 
     static readonly DateTime Epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
@@ -56,13 +61,14 @@ class ClaudeMonitor : ApplicationContext {
         ctxWarned = new HashSet<string>();
         sessionNames = new Dictionary<string, string>();
         haikuPending = new HashSet<string>();
+        gitInfoCache = new Dictionary<string, GitInfo>();
         sessionNamesPath = Path.Combine(claudeDir, ".session_names");
         credentialsPath = Path.Combine(claudeDir, ".credentials.json");
 
         LoadSessionNames();
 
         tray = new NotifyIcon();
-        tray.Icon = MakeDiamond(Color.FromArgb(100, 100, 140));
+        tray.Icon = MakeDiamond(Color.FromArgb(100, 100, 140), false);
         tray.Text = "Claude Monitor";
         tray.Visible = true;
         tray.MouseClick += new MouseEventHandler(OnTrayClick);
@@ -73,11 +79,25 @@ class ClaudeMonitor : ApplicationContext {
         timer.Tick += new EventHandler(OnTick);
         timer.Start();
 
+        // Stale file cleanup timer: every 30 minutes
+        cleanupTimer = new System.Windows.Forms.Timer();
+        cleanupTimer.Interval = 30 * 60 * 1000; // 30 minutes
+        cleanupTimer.Tick += new EventHandler(OnCleanupTick);
+        cleanupTimer.Start();
+
+        // Run cleanup once on startup
+        CleanupStaleFiles();
+
         DoRefresh();
     }
 
     void OnTrayClick(object sender, MouseEventArgs e) {
-        if (e.Button == MouseButtons.Left) ShowMenu();
+        // Feature 6: Refresh on both left-click and right-click
+        if (e.Button == MouseButtons.Left) {
+            ShowMenu();
+        } else if (e.Button == MouseButtons.Right) {
+            ShowMenu();
+        }
     }
 
     void OnTick(object sender, EventArgs e) {
@@ -88,19 +108,84 @@ class ClaudeMonitor : ApplicationContext {
         }
     }
 
-    // ── Icon ────────────────────────────────────────────
-    Icon MakeDiamond(Color c) {
+    void OnCleanupTick(object sender, EventArgs e) {
+        try {
+            CleanupStaleFiles();
+        } catch {
+            // Never let cleanup crash the app
+        }
+    }
+
+    // ── Feature 4: Stale file cleanup ─────────────────────
+    void CleanupStaleFiles() {
+        try {
+            if (!Directory.Exists(claudeDir)) return;
+            string[] prefixes = new string[] { ".state_", ".ctx_", ".ctxlog_", ".ctx_pct_", ".tty_map_" };
+            DateTime cutoff = DateTime.UtcNow.AddHours(-24);
+
+            string[] files = Directory.GetFiles(claudeDir);
+            for (int i = 0; i < files.Length; i++) {
+                string name = Path.GetFileName(files[i]);
+                bool matches = false;
+                for (int p = 0; p < prefixes.Length; p++) {
+                    if (name.StartsWith(prefixes[p])) {
+                        matches = true;
+                        break;
+                    }
+                }
+                if (!matches) continue;
+
+                try {
+                    FileInfo fi = new FileInfo(files[i]);
+                    if (fi.LastWriteTimeUtc < cutoff) {
+                        File.Delete(files[i]);
+                    }
+                } catch {
+                    // Skip files that can't be deleted
+                }
+            }
+        } catch {
+            // Ignore cleanup errors
+        }
+    }
+
+    // ── Feature 8: Icon with glow effect ──────────────────
+    Icon MakeDiamond(Color c, bool glow) {
         Bitmap bmp = new Bitmap(16, 16);
         using (Graphics g = Graphics.FromImage(bmp)) {
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.Clear(Color.Transparent);
+
+            if (glow) {
+                // Draw a slightly larger, semi-transparent diamond behind the main one for glow
+                Color glowColor = Color.FromArgb(60, c.R, c.G, c.B);
+                SolidBrush glowBrush = new SolidBrush(glowColor);
+                g.FillPolygon(glowBrush, new Point[] {
+                    new Point(8, 0), new Point(16, 8), new Point(8, 16), new Point(0, 8)
+                });
+                glowBrush.Dispose();
+
+                // Second glow layer, slightly smaller
+                Color glowColor2 = Color.FromArgb(40, c.R, c.G, c.B);
+                SolidBrush glowBrush2 = new SolidBrush(glowColor2);
+                g.FillPolygon(glowBrush2, new Point[] {
+                    new Point(8, 0), new Point(15, 8), new Point(8, 16), new Point(1, 8)
+                });
+                glowBrush2.Dispose();
+            }
+
             SolidBrush brush = new SolidBrush(c);
             g.FillPolygon(brush, new Point[] {
-                new Point(8, 1), new Point(15, 8), new Point(8, 15), new Point(1, 8)
+                new Point(8, 2), new Point(14, 8), new Point(8, 14), new Point(2, 8)
             });
             brush.Dispose();
         }
         return Icon.FromHandle(bmp.GetHicon());
+    }
+
+    // Backward-compatible overload
+    Icon MakeDiamond(Color c) {
+        return MakeDiamond(c, false);
     }
 
     // ── Session model ───────────────────────────────────
@@ -114,6 +199,13 @@ class ClaudeMonitor : ApplicationContext {
         public int CtxPct;
         public string AiName = "";
         public string ContextLine = "";
+    }
+
+    // ── Feature 1: Git info model ─────────────────────────
+    class GitInfo {
+        public int ChangedFiles;
+        public string LastCommit = "";
+        public DateTime FetchedAt;
     }
 
     // ── Safe dictionary string extraction ───────────────
@@ -392,6 +484,69 @@ class ClaudeMonitor : ApplicationContext {
         return "";
     }
 
+    // ── Feature 1: Git info per project ───────────────────
+    string RunGitCommand(string dir, string arguments) {
+        try {
+            ProcessStartInfo psi = new ProcessStartInfo();
+            psi.FileName = "git";
+            psi.Arguments = "-C \"" + dir + "\" " + arguments;
+            psi.UseShellExecute = false;
+            psi.CreateNoWindow = true;
+            psi.RedirectStandardOutput = true;
+            psi.RedirectStandardError = true;
+
+            Process proc = new Process();
+            proc.StartInfo = psi;
+            proc.Start();
+
+            string output = proc.StandardOutput.ReadToEnd();
+            proc.WaitForExit(3000);
+            if (!proc.HasExited) {
+                try { proc.Kill(); } catch {}
+                return "";
+            }
+            if (proc.ExitCode != 0) return "";
+            return output.Trim();
+        } catch {
+            // git might not be installed
+            return "";
+        }
+    }
+
+    GitInfo GetGitInfo(string dir) {
+        if (string.IsNullOrEmpty(dir)) return null;
+
+        // Use cache if fresh (< 30 seconds)
+        if (gitInfoCache.ContainsKey(dir)) {
+            GitInfo cached = gitInfoCache[dir];
+            if ((DateTime.UtcNow - cached.FetchedAt).TotalSeconds < 30) {
+                return cached;
+            }
+        }
+
+        GitInfo info = new GitInfo();
+        info.FetchedAt = DateTime.UtcNow;
+
+        // Get changed file count
+        string porcelain = RunGitCommand(dir, "status --porcelain");
+        if (!string.IsNullOrEmpty(porcelain)) {
+            string[] lines = porcelain.Split(new char[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            info.ChangedFiles = lines.Length;
+        }
+
+        // Get last commit message
+        string lastCommit = RunGitCommand(dir, "log -1 --format=%s");
+        if (!string.IsNullOrEmpty(lastCommit)) {
+            if (lastCommit.Length > 50) {
+                lastCommit = lastCommit.Substring(0, 47) + "...";
+            }
+            info.LastCommit = lastCommit;
+        }
+
+        gitInfoCache[dir] = info;
+        return info;
+    }
+
     // ── Scan sessions ───────────────────────────────────
     List<Session> ScanSessions() {
         List<Session> list = new List<Session>();
@@ -535,6 +690,27 @@ class ClaudeMonitor : ApplicationContext {
         }
     }
 
+    // ── Feature 2: Weekly delta ─────────────────────────
+    string ReadWeeklyDelta() {
+        try {
+            string startPath = Path.Combine(claudeDir, ".weekly_start_pct");
+            if (!File.Exists(startPath)) return "";
+            string startStr = File.ReadAllText(startPath, Encoding.UTF8).Trim();
+            int startPct;
+            if (!int.TryParse(startStr, out startPct)) return "";
+            int delta = weekPct - startPct;
+            if (delta > 0) {
+                return "+" + delta + "% today";
+            } else if (delta == 0) {
+                return "no change today";
+            } else {
+                return delta + "% today";
+            }
+        } catch {
+            return "";
+        }
+    }
+
     string FmtReset(string iso) {
         if (string.IsNullOrEmpty(iso)) return "";
         try {
@@ -555,6 +731,65 @@ class ClaudeMonitor : ApplicationContext {
             return local.ToString("ddd HH:mm");
         } catch {
             return "";
+        }
+    }
+
+    // ── Feature 3: Launch at Login ────────────────────────
+    string GetStartupShortcutPath() {
+        string startupFolder = Environment.GetFolderPath(Environment.SpecialFolder.Startup);
+        return Path.Combine(startupFolder, "ClaudeMonitor.lnk");
+    }
+
+    bool IsLaunchAtLoginEnabled() {
+        return File.Exists(GetStartupShortcutPath());
+    }
+
+    void SetLaunchAtLogin(bool enabled) {
+        string shortcutPath = GetStartupShortcutPath();
+        if (enabled) {
+            try {
+                // Find the exe path: ~/.claude/ClaudeMonitor.exe
+                string exePath = Path.Combine(claudeDir, "ClaudeMonitor.exe");
+                if (!File.Exists(exePath)) {
+                    // Try current executable location as fallback
+                    exePath = System.Reflection.Assembly.GetExecutingAssembly().Location;
+                }
+
+                // Use WshShell COM object to create shortcut
+                Type wshType = Type.GetTypeFromProgID("WScript.Shell");
+                if (wshType == null) return;
+                object wshShell = Activator.CreateInstance(wshType);
+                object shortcut = wshType.InvokeMember("CreateShortcut",
+                    System.Reflection.BindingFlags.InvokeMethod, null, wshShell,
+                    new object[] { shortcutPath });
+                if (shortcut == null) return;
+
+                Type scType = shortcut.GetType();
+                scType.InvokeMember("TargetPath",
+                    System.Reflection.BindingFlags.SetProperty, null, shortcut,
+                    new object[] { exePath });
+                scType.InvokeMember("WorkingDirectory",
+                    System.Reflection.BindingFlags.SetProperty, null, shortcut,
+                    new object[] { Path.GetDirectoryName(exePath) });
+                scType.InvokeMember("Description",
+                    System.Reflection.BindingFlags.SetProperty, null, shortcut,
+                    new object[] { "Claude Monitor Tray App" });
+                scType.InvokeMember("Save",
+                    System.Reflection.BindingFlags.InvokeMethod, null, shortcut, null);
+
+                System.Runtime.InteropServices.Marshal.ReleaseComObject(shortcut);
+                System.Runtime.InteropServices.Marshal.ReleaseComObject(wshShell);
+            } catch {
+                // Ignore shortcut creation errors
+            }
+        } else {
+            try {
+                if (File.Exists(shortcutPath)) {
+                    File.Delete(shortcutPath);
+                }
+            } catch {
+                // Ignore deletion errors
+            }
         }
     }
 
@@ -609,10 +844,13 @@ class ClaudeMonitor : ApplicationContext {
             if (sessions[i].State == "active") hasActive = true;
         }
 
-        if (hasCtx) tray.Icon = MakeDiamond(Color.FromArgb(210, 56, 46));
-        else if (hasWait) tray.Icon = MakeDiamond(Color.FromArgb(242, 191, 51));
-        else if (hasActive) tray.Icon = MakeDiamond(Color.FromArgb(77, 217, 115));
-        else tray.Icon = MakeDiamond(Color.FromArgb(100, 100, 140));
+        bool hasAnySessions = n > 0;
+
+        // Feature 8: glow effect for active sessions
+        if (hasCtx) tray.Icon = MakeDiamond(Color.FromArgb(210, 56, 46), hasAnySessions);
+        else if (hasWait) tray.Icon = MakeDiamond(Color.FromArgb(242, 191, 51), hasAnySessions);
+        else if (hasActive) tray.Icon = MakeDiamond(Color.FromArgb(77, 217, 115), hasAnySessions);
+        else tray.Icon = MakeDiamond(Color.FromArgb(100, 100, 140), false);
 
         string tip = "Claude Monitor";
         if (n > 0) {
@@ -621,6 +859,18 @@ class ClaudeMonitor : ApplicationContext {
         }
         if (tip.Length > 63) tip = tip.Substring(0, 63);
         tray.Text = tip;
+    }
+
+    // ── Feature 5: Copy /compact for waiting sessions ─────
+    void CopyCompactForSession(Session s) {
+        try {
+            Clipboard.SetText("/compact");
+            string title = !string.IsNullOrEmpty(s.AiName) ? s.AiName : s.Project;
+            tray.ShowBalloonTip(3000, title,
+                "Copied /compact \u2014 paste in the session terminal", ToolTipIcon.Info);
+        } catch {
+            // Clipboard might be locked
+        }
     }
 
     // ── Menu ────────────────────────────────────────────
@@ -640,8 +890,12 @@ class ClaudeMonitor : ApplicationContext {
         menu.ForeColor = Color.White;
         menu.ShowImageMargin = false;
 
-        // ── Title ──
-        ToolStripItem titleItem = menu.Items.Add("\u25C7  Claude Monitor");
+        // ── Title (Feature 7: session count in title) ──
+        string titleText = "\u25C7  Claude Monitor";
+        if (sessions.Count > 0) {
+            titleText = titleText + " \u00B7 " + sessions.Count + " session" + (sessions.Count != 1 ? "s" : "");
+        }
+        ToolStripItem titleItem = menu.Items.Add(titleText);
         titleItem.Font = new Font("Segoe UI", 10.5f, FontStyle.Bold);
         titleItem.ForeColor = Color.FromArgb(160, 170, 210);
         titleItem.Enabled = false;
@@ -679,6 +933,25 @@ class ClaudeMonitor : ApplicationContext {
                     branchItem.Font = new Font("Segoe UI", 8.5f);
                     branchItem.ForeColor = Color.FromArgb(80, 200, 190);
                     branchItem.Enabled = false;
+                }
+
+                // Feature 1: Git info line under branch
+                GitInfo gitInfo = GetGitInfo(dirKey);
+                if (gitInfo != null && (gitInfo.ChangedFiles > 0 || !string.IsNullOrEmpty(gitInfo.LastCommit))) {
+                    string gitLine = "    ";
+                    if (gitInfo.ChangedFiles > 0) {
+                        gitLine = gitLine + gitInfo.ChangedFiles + " changed";
+                    }
+                    if (!string.IsNullOrEmpty(gitInfo.LastCommit)) {
+                        if (gitInfo.ChangedFiles > 0) {
+                            gitLine = gitLine + " \u00B7 ";
+                        }
+                        gitLine = gitLine + gitInfo.LastCommit;
+                    }
+                    ToolStripItem gitItem = menu.Items.Add(gitLine);
+                    gitItem.Font = new Font("Segoe UI", 8.5f);
+                    gitItem.ForeColor = Color.FromArgb(110, 115, 135);
+                    gitItem.Enabled = false;
                 }
 
                 // Multi-session warning
@@ -724,7 +997,17 @@ class ClaudeMonitor : ApplicationContext {
                     ToolStripItem sessItem = menu.Items.Add(sessionLine);
                     sessItem.Font = new Font("Segoe UI", 9.5f, FontStyle.Bold);
                     sessItem.ForeColor = dotColor;
-                    sessItem.Enabled = false;
+
+                    // Feature 5: clickable waiting sessions copy /compact
+                    if (s.State == "waiting") {
+                        sessItem.Enabled = true;
+                        Session capturedSession = s;
+                        sessItem.Click += new EventHandler(delegate(object sender, EventArgs e) {
+                            CopyCompactForSession(capturedSession);
+                        });
+                    } else {
+                        sessItem.Enabled = false;
+                    }
 
                     // Context line below session (gray, indented)
                     if (!string.IsNullOrEmpty(s.ContextLine)) {
@@ -741,8 +1024,10 @@ class ClaudeMonitor : ApplicationContext {
 
         // ── Usage bars ──
         if (sessPct > 0 || weekPct > 0) {
-            AddBar(menu, "Session", sessPct, sessReset);
-            AddBar(menu, "Weekly ", weekPct, weekReset);
+            AddBar(menu, "Session", sessPct, sessReset, "");
+            // Feature 2: weekly delta
+            string weeklyDelta = ReadWeeklyDelta();
+            AddBar(menu, "Weekly ", weekPct, weekReset, weeklyDelta);
             menu.Items.Add(new ToolStripSeparator());
         }
 
@@ -789,6 +1074,17 @@ class ClaudeMonitor : ApplicationContext {
         });
         settings.DropDownItems.Add(nc);
 
+        // Feature 3: Launch at Login toggle
+        ToolStripMenuItem launchLogin = new ToolStripMenuItem("Launch at Login");
+        launchLogin.Checked = IsLaunchAtLoginEnabled();
+        launchLogin.ForeColor = Color.White;
+        launchLogin.Click += new EventHandler(delegate(object sender, EventArgs e) {
+            bool newState = !IsLaunchAtLoginEnabled();
+            SetLaunchAtLogin(newState);
+            launchLogin.Checked = newState;
+        });
+        settings.DropDownItems.Add(launchLogin);
+
         menu.Items.Add(settings);
 
         ToolStripItem quit = menu.Items.Add("\u2715  Quit");
@@ -813,7 +1109,7 @@ class ClaudeMonitor : ApplicationContext {
         item.Font = new Font("Segoe UI", 9.5f);
     }
 
-    void AddBar(ContextMenuStrip menu, string label, int pct, string reset) {
+    void AddBar(ContextMenuStrip menu, string label, int pct, string reset, string delta) {
         int filled = Math.Min(pct * 16 / 100, 16);
         string bar = new string('\u2588', filled) + new string('\u2591', 16 - filled);
         Color color;
@@ -827,6 +1123,10 @@ class ClaudeMonitor : ApplicationContext {
         string text = "  " + label + "  " + bar + "  " + pct + "%";
         if (!string.IsNullOrEmpty(reset)) {
             text = text + "  \u21BB " + reset;
+        }
+        // Feature 2: append weekly delta
+        if (!string.IsNullOrEmpty(delta)) {
+            text = text + "  " + delta;
         }
         ToolStripItem item = menu.Items.Add(text);
         item.Enabled = false;
