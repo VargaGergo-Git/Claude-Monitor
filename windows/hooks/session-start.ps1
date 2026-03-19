@@ -62,7 +62,7 @@ if ($SessionId) {
             agents = 0
         }
 
-        [System.IO.File]::WriteAllText($sessionsFile, (ConvertTo-Json @($sessions) -Depth 3), (New-Object System.Text.UTF8Encoding $false)) -ErrorAction SilentlyContinue
+        try { [System.IO.File]::WriteAllText($sessionsFile, (ConvertTo-Json @($sessions) -Depth 3), (New-Object System.Text.UTF8Encoding $false)) } catch {}
     } catch {}
 }
 
