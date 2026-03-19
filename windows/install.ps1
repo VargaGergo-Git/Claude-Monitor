@@ -18,6 +18,13 @@ function Write-Ok($msg)    { Write-Host "[OK] " -ForegroundColor Green -NoNewlin
 function Write-Warn($msg)  { Write-Host "[!] " -ForegroundColor Yellow -NoNewline; Write-Host $msg }
 function Write-Err($msg)   { Write-Host "[X] " -ForegroundColor Red -NoNewline; Write-Host $msg }
 
+# Write settings.json in UTF-8 (no BOM). PS 5.1's Set-Content defaults to
+# ANSI encoding, which corrupts Unicode chars like ő when Node.js reads as UTF-8.
+$Utf8NoBom = New-Object System.Text.UTF8Encoding $false
+function Write-SettingsJson($content) {
+    [System.IO.File]::WriteAllText($Settings, $content, $Utf8NoBom)
+}
+
 Write-Host ""
 Write-Host "Claude Monitor" -ForegroundColor White -NoNewline
 Write-Host " -- System tray app + hooks for Claude Code" -ForegroundColor Gray
@@ -114,7 +121,7 @@ function Resolve-SettingsPaths {
     $content = Get-Content $Settings -Raw -ErrorAction SilentlyContinue
     if (-not $content -or $content -notmatch '%USERPROFILE%') { return }
     $resolved = $content.Replace('%USERPROFILE%', $env:USERPROFILE.Replace('\', '\\'))
-    Set-Content $Settings $resolved
+    Write-SettingsJson $resolved
     Write-Ok "Resolved %USERPROFILE% to real path in settings.json"
 }
 
@@ -134,7 +141,7 @@ function Configure-Settings {
         # Remove comment fields
         $template.PSObject.Properties.Remove('_comment')
         $template.PSObject.Properties.Remove('_instructions')
-        $template | ConvertTo-Json -Depth 10 | Set-Content $Settings
+        Write-SettingsJson ($template | ConvertTo-Json -Depth 10)
         Resolve-SettingsPaths
         Write-Ok "Created settings.json with hooks configuration"
         return
@@ -152,7 +159,7 @@ function Configure-Settings {
         $template = Get-Content $templatePath -Raw | ConvertFrom-Json
         $template.PSObject.Properties.Remove('_comment')
         $template.PSObject.Properties.Remove('_instructions')
-        $template | ConvertTo-Json -Depth 10 | Set-Content $Settings
+        Write-SettingsJson ($template | ConvertTo-Json -Depth 10)
         Resolve-SettingsPaths
         Write-Ok "Created settings.json from template (previous file was empty/invalid)"
         return
@@ -167,12 +174,16 @@ function Configure-Settings {
             $backup = "$Settings.pre-monitor-statusline-backup"
             Copy-Item $Settings $backup -Force
             $existing | Add-Member -NotePropertyName "statusLine" -NotePropertyValue $template.statusLine -Force
-            $existing | ConvertTo-Json -Depth 10 | Set-Content $Settings
+            Write-SettingsJson ($existing | ConvertTo-Json -Depth 10)
             Write-Ok "Added missing statusLine to settings.json (backup: $backup)"
         }
 
-        # Fix %USERPROFILE% in hook commands (Unicode username safety)
+        # Fix %USERPROFILE% and re-encode as UTF-8 (Unicode username safety)
         Resolve-SettingsPaths
+        # Re-save as UTF-8 even if no %USERPROFILE% to replace (prior
+        # installs may have written ANSI which corrupts Unicode paths)
+        $raw = Get-Content $Settings -Raw -ErrorAction SilentlyContinue
+        if ($raw) { Write-SettingsJson $raw }
         return
     }
 
@@ -185,7 +196,7 @@ function Configure-Settings {
     if ($template.statusLine) {
         $existing | Add-Member -NotePropertyName "statusLine" -NotePropertyValue $template.statusLine -Force
     }
-    $existing | ConvertTo-Json -Depth 10 | Set-Content $Settings
+    Write-SettingsJson ($existing | ConvertTo-Json -Depth 10)
 
     Write-Ok "Merged hooks + statusline into settings.json"
     Write-Ok "Backup saved to $backup"
