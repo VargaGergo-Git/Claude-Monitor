@@ -4,10 +4,315 @@ import Foundation
 struct Session {
     var pid, project, branch, dir, duration, tty, lastCommit, context, name, sid: String
     var modifiedFiles: Int
-    var state: String          // "active", "waiting", or ""
-    var contextPct: Int        // context window usage 0-100
-    var smartContext: String   // Haiku-summarized context
+    var state: String
+    var contextPct: Int
+    var smartContext: String
 }
+
+// MARK: - Overlay Panel
+
+class OverlayPanel: NSPanel {
+    init() {
+        super.init(contentRect: NSRect(x: 0, y: 0, width: 320, height: 48),
+                   styleMask: [.nonactivatingPanel, .fullSizeContentView],
+                   backing: .buffered, defer: true)
+        self.level = .floating
+        self.isOpaque = false
+        self.backgroundColor = .clear
+        self.hasShadow = true
+        self.isMovableByWindowBackground = true
+        self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        self.hidesOnDeactivate = false
+        self.titleVisibility = .hidden
+        self.titlebarAppearsTransparent = true
+
+        let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        self.setFrameOrigin(NSPoint(x: screen.maxX - 336, y: screen.maxY - 64))
+    }
+}
+
+class OverlayView: NSView {
+    var sessions: [Session] = []
+    var sessPct = 0, weekPct = 0
+    var sessReset = "", weekReset = "", weeklyDelta = ""
+    var compact = false
+    var cardRects: [NSRect] = []
+    var hoverIndex = -1
+    var closeHover = false
+    var trackingArea: NSTrackingArea?
+
+    // Callbacks
+    var onSessionClick: ((Session) -> Void)?
+    var onClose: (() -> Void)?
+    var onToggleCompact: (() -> Void)?
+
+    override var isFlipped: Bool { true }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let ta = trackingArea { removeTrackingArea(ta) }
+        trackingArea = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways], owner: self, userInfo: nil)
+        addTrackingArea(trackingArea!)
+    }
+
+    func recalcHeight() {
+        if compact {
+            frame.size = NSSize(width: 320, height: 48)
+        } else {
+            let h = 36 + CGFloat(sessions.count) * 54 + 44 + 8
+            frame.size = NSSize(width: 320, height: min(max(h, 48), 420))
+        }
+        window?.setContentSize(frame.size)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let w = bounds.width, h = bounds.height
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 14, yRadius: 14)
+
+        // Background — dark glass
+        NSColor(white: 0.06, alpha: 0.88).setFill()
+        path.fill()
+
+        // Border
+        NSColor(white: 0.2, alpha: 0.5).setStroke()
+        path.lineWidth = 0.5
+        path.stroke()
+
+        // Close button (top-right)
+        let closeRect = NSRect(x: w - 26, y: 6, width: 18, height: 18)
+        let closeColor: NSColor = closeHover ? NSColor(red: 0.85, green: 0.25, blue: 0.2, alpha: 1) : NSColor(white: 0.35, alpha: 1)
+        let closeStr = NSAttributedString(string: "\u{00D7}", attributes: [
+            .font: NSFont.systemFont(ofSize: 12, weight: .bold),
+            .foregroundColor: closeColor
+        ])
+        closeStr.draw(at: NSPoint(x: closeRect.minX + 4, y: closeRect.minY + 1))
+
+        var y: CGFloat = 0
+
+        // == HEADER ==
+        let anyActive = sessions.contains { $0.state == "active" }
+        let anyWaiting = sessions.contains { $0.state == "waiting" }
+        let diamondColor: NSColor = anyActive ? NSColor(red: 0.3, green: 0.78, blue: 0.5, alpha: 1) :
+            anyWaiting ? NSColor(red: 0.9, green: 0.7, blue: 0.15, alpha: 1) :
+            NSColor(white: 0.45, alpha: 1)
+
+        // Diamond shape
+        let dp = NSBezierPath()
+        dp.move(to: NSPoint(x: 14, y: y + 10))
+        dp.line(to: NSPoint(x: 20, y: y + 18))
+        dp.line(to: NSPoint(x: 14, y: y + 26))
+        dp.line(to: NSPoint(x: 8, y: y + 18))
+        dp.close()
+        diamondColor.setFill(); dp.fill()
+
+        let headerText = sessions.isEmpty ? "Claude Monitor" : "\(sessions.count) session\(sessions.count != 1 ? "s" : "")"
+        let headerAttrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 12, weight: .bold),
+            .foregroundColor: NSColor(white: 0.85, alpha: 1)
+        ]
+        (headerText as NSString).draw(at: NSPoint(x: 28, y: y + 10), withAttributes: headerAttrs)
+
+        // State dots next to header
+        if !sessions.isEmpty {
+            let textWidth = (headerText as NSString).size(withAttributes: headerAttrs).width
+            var dotX = 28 + textWidth + 6
+            for s in sessions {
+                let dc: NSColor = s.state == "active" ? NSColor(red: 0.3, green: 0.78, blue: 0.5, alpha: 1) :
+                    s.state == "waiting" ? NSColor(red: 0.9, green: 0.7, blue: 0.15, alpha: 1) :
+                    NSColor(white: 0.25, alpha: 1)
+                dc.setFill()
+                NSBezierPath(ovalIn: NSRect(x: dotX, y: y + 14, width: 7, height: 7)).fill()
+                dotX += 12
+            }
+        }
+        y += 36
+
+        if compact {
+            // Compact: usage inline
+            if sessPct > 0 || weekPct > 0 {
+                let compactStr = "S:\(sessPct)%  W:\(weekPct)%"
+                let compactAttrs: [NSAttributedString.Key: Any] = [
+                    .font: NSFont.monospacedSystemFont(ofSize: 10, weight: .medium),
+                    .foregroundColor: barColor(sessPct)
+                ]
+                (compactStr as NSString).draw(at: NSPoint(x: 28, y: y - 4), withAttributes: compactAttrs)
+            }
+            return
+        }
+
+        // == SESSION CARDS ==
+        cardRects = []
+        for (i, s) in sessions.enumerated() {
+            let cardRect = NSRect(x: 6, y: y, width: w - 12, height: 52)
+            cardRects.append(cardRect)
+
+            // Card background
+            let isHover = hoverIndex == i
+            let cardBg: NSColor = isHover ? NSColor(white: 0.12, alpha: 0.7) : NSColor(white: 0.08, alpha: 0.5)
+            let cardPath = NSBezierPath(roundedRect: cardRect, xRadius: 8, yRadius: 8)
+            cardBg.setFill(); cardPath.fill()
+
+            let cx = cardRect.minX + 10, cy = cardRect.minY + 6
+
+            // State dot
+            let dotColor: NSColor = s.state == "active" ? NSColor(red: 0.3, green: 0.78, blue: 0.5, alpha: 1) :
+                s.state == "waiting" ? NSColor(red: 0.9, green: 0.7, blue: 0.15, alpha: 1) :
+                NSColor(white: 0.25, alpha: 1)
+            dotColor.setFill()
+            NSBezierPath(ovalIn: NSRect(x: cx, y: cy + 3, width: 8, height: 8)).fill()
+
+            // Name
+            let name = s.name.isEmpty ? "Session" : (s.name.count > 26 ? String(s.name.prefix(23)) + "..." : s.name)
+            let nameAttrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 11, weight: .bold),
+                .foregroundColor: NSColor.white
+            ]
+            (name as NSString).draw(at: NSPoint(x: cx + 14, y: cy), withAttributes: nameAttrs)
+
+            // Right: ctx% + duration
+            var rightParts: [String] = []
+            if s.contextPct > 0 { rightParts.append("ctx \(s.contextPct)%") }
+            if !s.duration.isEmpty { rightParts.append(s.duration) }
+            let rightStr = rightParts.joined(separator: " \u{00B7} ")
+            if !rightStr.isEmpty {
+                let rightAttrs: [NSAttributedString.Key: Any] = [
+                    .font: NSFont.monospacedSystemFont(ofSize: 9, weight: .medium),
+                    .foregroundColor: NSColor(white: 0.45, alpha: 1)
+                ]
+                let rightSize = (rightStr as NSString).size(withAttributes: rightAttrs)
+                (rightStr as NSString).draw(at: NSPoint(x: cardRect.maxX - rightSize.width - 8, y: cy + 2), withAttributes: rightAttrs)
+            }
+
+            // Smart context or fallback (line 2)
+            var ctxLine = s.smartContext.isEmpty ? s.context : s.smartContext
+            if ctxLine.isEmpty {
+                ctxLine = s.state == "waiting" ? "Waiting for your input" : "Working..."
+            }
+            if ctxLine.count > 45 { ctxLine = String(ctxLine.prefix(42)) + "..." }
+            let ctxColor: NSColor = s.smartContext.isEmpty ? NSColor(white: 0.38, alpha: 1) : NSColor(red: 0.5, green: 0.55, blue: 0.78, alpha: 1)
+            let ctxAttrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 10, weight: .medium),
+                .foregroundColor: ctxColor
+            ]
+            (ctxLine as NSString).draw(at: NSPoint(x: cx + 14, y: cy + 17), withAttributes: ctxAttrs)
+
+            // Mini progress bar (line 3)
+            let barX = cx + 14, barY = cy + 33, barW: CGFloat = 100, barH: CGFloat = 3
+            NSColor(white: 0.15, alpha: 1).setFill()
+            NSBezierPath(roundedRect: NSRect(x: barX, y: barY, width: barW, height: barH), xRadius: 1.5, yRadius: 1.5).fill()
+            let fillW = barW * CGFloat(min(s.contextPct, 100)) / 100
+            if fillW > 0 {
+                barColor(s.contextPct).setFill()
+                NSBezierPath(roundedRect: NSRect(x: barX, y: barY, width: fillW, height: barH), xRadius: 1.5, yRadius: 1.5).fill()
+            }
+
+            // Waiting badge
+            if s.state == "waiting" {
+                let badge = "click to jump"
+                let badgeAttrs: [NSAttributedString.Key: Any] = [
+                    .font: NSFont.systemFont(ofSize: 8, weight: .bold),
+                    .foregroundColor: NSColor(red: 0.9, green: 0.7, blue: 0.15, alpha: 0.8)
+                ]
+                let badgeSize = (badge as NSString).size(withAttributes: badgeAttrs)
+                (badge as NSString).draw(at: NSPoint(x: cardRect.maxX - badgeSize.width - 10, y: barY - 2), withAttributes: badgeAttrs)
+            }
+
+            y += 54
+        }
+
+        // == USAGE ==
+        let uy = y + 4
+        if sessPct > 0 || weekPct > 0 {
+            drawUsageBar(label: "Session", pct: sessPct, reset: sessReset, delta: "", x: 10, y: uy)
+            drawUsageBar(label: "Weekly ", pct: weekPct, reset: weekReset, delta: weeklyDelta, x: 10, y: uy + 18)
+        } else {
+            let noData = "No usage data yet"
+            let noAttrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 10, weight: .medium),
+                .foregroundColor: NSColor(white: 0.25, alpha: 1)
+            ]
+            (noData as NSString).draw(at: NSPoint(x: 10, y: uy + 4), withAttributes: noAttrs)
+        }
+    }
+
+    func drawUsageBar(label: String, pct: Int, reset: String, delta: String, x: CGFloat, y: CGFloat) {
+        let labelAttrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedSystemFont(ofSize: 10, weight: .medium),
+            .foregroundColor: NSColor(white: 0.35, alpha: 1)
+        ]
+        (label as NSString).draw(at: NSPoint(x: x, y: y), withAttributes: labelAttrs)
+
+        let bx = x + 56, bw: CGFloat = 96, bh: CGFloat = 8
+        NSColor(white: 0.12, alpha: 1).setFill()
+        NSBezierPath(roundedRect: NSRect(x: bx, y: y + 3, width: bw, height: bh), xRadius: 3, yRadius: 3).fill()
+        let fw = bw * CGFloat(min(pct, 100)) / 100
+        if fw > 0 {
+            barColor(pct).setFill()
+            NSBezierPath(roundedRect: NSRect(x: bx, y: y + 3, width: fw, height: bh), xRadius: 3, yRadius: 3).fill()
+        }
+
+        var extra = "\(pct)%"
+        if !reset.isEmpty { extra += " \u{21BB}\(reset)" }
+        if !delta.isEmpty { extra += " \(delta)" }
+        let extraAttrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedSystemFont(ofSize: 10, weight: .medium),
+            .foregroundColor: barColor(pct)
+        ]
+        (extra as NSString).draw(at: NSPoint(x: bx + bw + 4, y: y), withAttributes: extraAttrs)
+    }
+
+    func barColor(_ pct: Int) -> NSColor {
+        if pct >= 80 { return NSColor(red: 0.82, green: 0.27, blue: 0.23, alpha: 1) }
+        if pct >= 50 { return NSColor(red: 0.78, green: 0.63, blue: 0.15, alpha: 1) }
+        return NSColor(red: 0.22, green: 0.62, blue: 0.39, alpha: 1)
+    }
+
+    // -- Mouse events --
+
+    override func mouseDown(with event: NSEvent) {
+        let loc = convert(event.locationInWindow, from: nil)
+
+        // Close button
+        let closeRect = NSRect(x: bounds.width - 26, y: 6, width: 18, height: 18)
+        if closeRect.contains(loc) { onClose?(); return }
+
+        // Double-click header = toggle compact
+        if event.clickCount == 2 && loc.y < 36 { onToggleCompact?(); return }
+
+        // Session card click → jump to terminal
+        if !compact {
+            for (i, rect) in cardRects.enumerated() where rect.contains(loc) {
+                if i < sessions.count { onSessionClick?(sessions[i]) }
+                return
+            }
+        }
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        let loc = convert(event.locationInWindow, from: nil)
+        var newHover = -1
+        if !compact {
+            for (i, rect) in cardRects.enumerated() where rect.contains(loc) { newHover = i; break }
+        }
+        let newClose = NSRect(x: bounds.width - 26, y: 6, width: 18, height: 18).contains(loc)
+        if newHover != hoverIndex || newClose != closeHover {
+            hoverIndex = newHover; closeHover = newClose
+            NSCursor.pointingHand.set()
+            needsDisplay = true
+        }
+        if newHover < 0 && !newClose { NSCursor.arrow.set() }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        if hoverIndex >= 0 || closeHover {
+            hoverIndex = -1; closeHover = false
+            NSCursor.arrow.set()
+            needsDisplay = true
+        }
+    }
+}
+
+// MARK: - Monitor
 
 class Monitor: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
@@ -15,14 +320,26 @@ class Monitor: NSObject, NSApplicationDelegate {
     private let home = NSHomeDirectory()
     private var nameCache: [String: String] = [:]
     private var pendingNames = Set<String>()
-    private var smartCtxCache: [String: String] = [:]    // sid -> smart summary
-    private var lastCtxHash: [String: String] = [:]      // sid -> hash of context log
+    private var smartCtxCache: [String: String] = [:]
+    private var lastCtxHash: [String: String] = [:]
     private var pendingCtx = Set<String>()
-    private var prevStates: [String: String] = [:]       // sid -> last known state
-    private var ctxWarned = Set<String>()                // sids already warned about context
-    private var renamedTTYs = Set<String>()              // ttys already renamed in Terminal
+    private var prevStates: [String: String] = [:]
+    private var ctxWarned = Set<String>()
+    private var renamedTTYs = Set<String>()
 
-    // Settings (persisted in UserDefaults)
+    // Overlay
+    private var overlayPanel: OverlayPanel!
+    private var overlayView: OverlayView!
+    private var showOverlay: Bool {
+        get { ud.object(forKey: "showOverlay") as? Bool ?? true }
+        set { ud.set(newValue, forKey: "showOverlay") }
+    }
+    private var overlayCompact: Bool {
+        get { ud.object(forKey: "overlayCompact") as? Bool ?? false }
+        set { ud.set(newValue, forKey: "overlayCompact") }
+    }
+
+    // Settings
     private let ud = UserDefaults.standard
     private var notifyWaiting: Bool { get { ud.object(forKey: "notifyWaiting") as? Bool ?? true } set { ud.set(newValue, forKey: "notifyWaiting") } }
     private var notifyContext: Bool { get { ud.object(forKey: "notifyContext") as? Bool ?? true } set { ud.set(newValue, forKey: "notifyContext") } }
@@ -39,10 +356,25 @@ class Monitor: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ n: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        // Ensure ~/.claude/ exists (works even before first Claude Code session)
         try? FileManager.default.createDirectory(atPath: "\(home)/.claude", withIntermediateDirectories: true)
         cleanupStaleFiles()
         loadNameCache()
+
+        // Create overlay
+        overlayPanel = OverlayPanel()
+        overlayView = OverlayView(frame: NSRect(x: 0, y: 0, width: 320, height: 48))
+        overlayView.compact = overlayCompact
+        overlayView.onSessionClick = { [weak self] session in self?.jumpToSession(session) }
+        overlayView.onClose = { [weak self] in self?.showOverlay = false; self?.overlayPanel.orderOut(nil) }
+        overlayView.onToggleCompact = { [weak self] in
+            guard let self else { return }
+            self.overlayCompact.toggle()
+            self.overlayView.compact = self.overlayCompact
+            self.updateOverlay()
+        }
+        overlayPanel.contentView = overlayView
+        if showOverlay { overlayPanel.orderFront(nil) }
+
         scan(); build()
         Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.build() }
         Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in self?.scan(); self?.build() }
@@ -52,13 +384,65 @@ class Monitor: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func jumpToSession(_ session: Session) {
+        let tty = session.tty
+        guard !tty.isEmpty else { return }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        p.arguments = ["-e", """
+        tell application "Terminal"
+            activate
+            repeat with w in windows
+                repeat with t in tabs of w
+                    if tty of t is "/dev/\(tty)" then
+                        set selected tab of w to t
+                        set index of w to 1
+                        return
+                    end if
+                end repeat
+            end repeat
+        end tell
+        """]
+        p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
+        try? p.run()
+    }
+
+    private func updateOverlay() {
+        guard showOverlay else { overlayPanel.orderOut(nil); return }
+
+        overlayView.sessions = sessions
+        overlayView.compact = overlayCompact
+
+        // Read usage
+        if let data = FileManager.default.contents(atPath: "\(home)/.claude/.usage_cache.json"),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let fh = json["five_hour"] as? [String: Any]
+            let sd = json["seven_day"] as? [String: Any]
+            overlayView.sessPct = Int(fh?["utilization"] as? Double ?? 0)
+            overlayView.weekPct = Int(sd?["utilization"] as? Double ?? 0)
+            overlayView.sessReset = fmtReset(fh?["resets_at"] as? String) ?? ""
+            overlayView.weekReset = fmtDay(sd?["resets_at"] as? String) ?? ""
+        }
+
+        let startPath = "\(home)/.claude/.weekly_start_pct"
+        if let startStr = try? String(contentsOfFile: startPath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+           let startPct = Int(startStr) {
+            let delta = overlayView.weekPct - startPct
+            overlayView.weeklyDelta = delta > 0 ? "+\(delta)%" : ""
+        }
+
+        overlayView.recalcHeight()
+        overlayView.needsDisplay = true
+        if !overlayPanel.isVisible { overlayPanel.orderFront(nil) }
+    }
+
     // MARK: - Cleanup
 
     private func cleanupStaleFiles() {
         let fm = FileManager.default
         let claudeDir = "\(home)/.claude"
         let prefixes = [".ctx_", ".state_", ".ctxlog_", ".tty_map_", ".tty_resolved_", ".name_tried_", ".activity_", ".files_", ".ctx_pct_"]
-        let cutoff = Date().addingTimeInterval(-86400) // 24 hours ago
+        let cutoff = Date().addingTimeInterval(-86400)
         guard let files = try? fm.contentsOfDirectory(atPath: claudeDir) else { return }
         for file in files {
             guard prefixes.contains(where: { file.hasPrefix($0) }) else { continue }
@@ -77,20 +461,15 @@ class Monitor: NSObject, NSApplicationDelegate {
             let sid = session.sid
             let prev = prevStates[sid] ?? ""
             let curr = session.state
-
-            // Notify: active -> waiting (Claude finished, needs input)
             if notifyWaiting && prev == "active" && curr == "waiting" {
                 let name = session.name.isEmpty ? session.project : session.name
                 notify(title: "\(name)", body: "Ready for your input", sound: notifySound ? "Tink" : nil)
             }
-
-            // Warn: context crossed 80%
             if notifyContext && session.contextPct >= 80 && !ctxWarned.contains(sid) {
                 ctxWarned.insert(sid)
                 let name = session.name.isEmpty ? session.project : session.name
-                notify(title: "\(name) — Context \(session.contextPct)%", body: "Consider running /compact to free up space", sound: notifySound ? "Submarine" : nil)
+                notify(title: "\(name) \u{2014} Context \(session.contextPct)%", body: "Consider running /compact", sound: notifySound ? "Submarine" : nil)
             }
-
             prevStates[sid] = curr
         }
     }
@@ -135,7 +514,6 @@ class Monitor: NSObject, NSApplicationDelegate {
             let sid = session.sid
             guard !pendingNames.contains(sid) else { continue }
             pendingNames.insert(sid)
-
             DispatchQueue.global(qos: .utility).async { [weak self] in
                 guard let self else { return }
                 let projectHash = session.dir.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: " ", with: "-")
@@ -174,20 +552,14 @@ class Monitor: NSObject, NSApplicationDelegate {
         for session in sessions where !session.sid.isEmpty {
             let sid = session.sid
             guard !pendingCtx.contains(sid) else { continue }
-
             let logPath = "\(home)/.claude/.ctxlog_\(sid)"
             guard let logData = try? String(contentsOfFile: logPath, encoding: .utf8),
                   !logData.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
-
-            // Only call if log changed
             let hash = String(logData.hashValue)
             if lastCtxHash[sid] == hash { continue }
             lastCtxHash[sid] = hash
             pendingCtx.insert(sid)
-
             let actions = logData.split(separator: "\n").suffix(6).joined(separator: ", ")
-
-            // Get git diff stat for richer context
             var diffStat = ""
             if let dir = sessions.first(where: { $0.sid == sid })?.dir {
                 let pipe = Pipe(); let proc = Process()
@@ -198,7 +570,6 @@ class Monitor: NSObject, NSApplicationDelegate {
                 let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
                 if let last = out.split(separator: "\n").last { diffStat = ", Git changes: \(last)" }
             }
-
             callHaiku(
                 prompt: "What is this coding session doing RIGHT NOW? Recent actions: \(actions)\(diffStat). Reply in 5-10 words, present tense, specific. No quotes.",
                 maxTokens: 25
@@ -210,9 +581,7 @@ class Monitor: NSObject, NSApplicationDelegate {
                         self.pendingCtx.remove(sid)
                         self.build()
                     }
-                } else {
-                    self.pendingCtx.remove(sid)
-                }
+                } else { self.pendingCtx.remove(sid) }
             }
         }
     }
@@ -220,7 +589,6 @@ class Monitor: NSObject, NSApplicationDelegate {
     // MARK: - Haiku API
 
     private var cachedToken: String?
-    // Haiku usage -- persisted in UserDefaults
     private var haikuCallCount: Int {
         get { ud.integer(forKey: "haikuCalls") }
         set { ud.set(newValue, forKey: "haikuCalls") }
@@ -237,7 +605,6 @@ class Monitor: NSObject, NSApplicationDelegate {
             if let cached = self.cachedToken { token = cached }
             else if let t = self.getOAuthToken() { self.cachedToken = t; token = t }
             else { completion(nil); return }
-
             let body: [String: Any] = [
                 "model": "claude-haiku-4-5-20251001", "max_tokens": maxTokens,
                 "messages": [["role": "user", "content": prompt]]
@@ -250,21 +617,16 @@ class Monitor: NSObject, NSApplicationDelegate {
             request.setValue("application/json", forHTTPHeaderField: "content-type")
             request.httpBody = try? JSONSerialization.data(withJSONObject: body)
             request.timeoutInterval = 8
-
             URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
                 var result: String?
                 if let data, let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let content = json["content"] as? [[String: Any]],
                    let text = content.first?["text"] as? String {
                     result = text
-                    // Track usage
                     if let usage = json["usage"] as? [String: Any] {
                         let inp = usage["input_tokens"] as? Int ?? 0
                         let out = usage["output_tokens"] as? Int ?? 0
-                        DispatchQueue.main.async {
-                            self?.haikuCallCount += 1
-                            self?.haikuTokensUsed += inp + out
-                        }
+                        DispatchQueue.main.async { self?.haikuCallCount += 1; self?.haikuTokensUsed += inp + out }
                     }
                 }
                 completion(result)
@@ -305,7 +667,6 @@ class Monitor: NSObject, NSApplicationDelegate {
                 current=$parent
             done
         done
-
         for pid in $(ps -eo pid,tty,comm 2>/dev/null | awk '$3 == "claude" && $2 != "??" {print $1}'); do
             dir=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | awk '/^n/{print substr($0,2)}')
             [ -z "$dir" ] && continue
@@ -325,7 +686,6 @@ class Monitor: NSObject, NSApplicationDelegate {
             echo "$pid|$dir|$branch|$etime|$tty|$modified|$lastcommit|$ctx|$sid|$state|$ctxpct"
         done
         """
-
         let pipe = Pipe(); let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/bin/bash")
         proc.arguments = ["-c", script]
@@ -366,11 +726,9 @@ class Monitor: NSObject, NSApplicationDelegate {
     private func renameTerminalTabs() {
         var renames: [(tty: String, title: String)] = []
         for session in sessions where !session.name.isEmpty && !session.tty.isEmpty {
-            let title = session.name.replacingOccurrences(of: "\"", with: "'")
-            renames.append((session.tty, title))
+            renames.append((session.tty, session.name.replacingOccurrences(of: "\"", with: "'")))
         }
         guard !renames.isEmpty else { return }
-
         var checks = ""
         for r in renames {
             checks += """
@@ -385,20 +743,9 @@ class Monitor: NSObject, NSApplicationDelegate {
                             end if\n
             """
         }
-
         DispatchQueue.global(qos: .utility).async {
-            let script = """
-            tell application "Terminal"
-                repeat with w in windows
-                    repeat with t in tabs of w
-                        set ttyPath to tty of t
-                        \(checks)
-                    end repeat
-                end repeat
-            end tell
-            """
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            let script = "tell application \"Terminal\"\nrepeat with w in windows\nrepeat with t in tabs of w\nset ttyPath to tty of t\n\(checks)\nend repeat\nend repeat\nend tell"
+            let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
             p.arguments = ["-e", script]
             p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
             try? p.run(); p.waitUntilExit()
@@ -423,7 +770,6 @@ class Monitor: NSObject, NSApplicationDelegate {
         let menu = NSMenu(); menu.autoenablesItems = false
         menu.appearance = NSAppearance(named: .darkAqua)
 
-        // Menu bar button: count + waiting + timer
         let n = sessions.count
         let waitingCount = sessions.filter { $0.state == "waiting" }.count
         let activeSession = sessions.first { $0.state == "active" }
@@ -447,20 +793,17 @@ class Monitor: NSObject, NSApplicationDelegate {
 
         guard !sessions.isEmpty else {
             txt("  No active sessions", sz: 13, wt: .medium, cl: .white, menu: menu)
-            footer(menu); statusItem.menu = menu; return
+            footer(menu); statusItem.menu = menu; updateOverlay(); return
         }
 
         let byDir = Dictionary(grouping: sessions, by: \.dir)
         for (_, group) in byDir.sorted(by: { $0.key < $1.key }) {
             let first = group[0]
-
-            // Project header
             let h = NSMutableAttributedString()
             h.append(a("  \(first.project) ", sz: 14, wt: .bold, cl: .white))
             if !first.branch.isEmpty { h.append(a(first.branch, sz: 12, wt: .bold, cl: teal, mono: true)) }
             item(h, menu: menu)
 
-            // Branch warning + split
             if group.count > 1 {
                 txt("  \u{26A0} \(group.count) sessions sharing one branch", sz: 12, wt: .bold, cl: amber, menu: menu)
                 let splitItem = NSMenuItem(title: "", action: #selector(splitBranches(_:)), keyEquivalent: "")
@@ -470,7 +813,6 @@ class Monitor: NSObject, NSApplicationDelegate {
                 menu.addItem(splitItem)
             }
 
-            // Git info
             if first.modifiedFiles > 0 || !first.lastCommit.isEmpty {
                 var info = first.modifiedFiles > 0 ? "  \(first.modifiedFiles) changed" : ""
                 if !first.lastCommit.isEmpty { info += info.isEmpty ? "  \(first.lastCommit)" : " \u{00B7} \(first.lastCommit)" }
@@ -482,65 +824,43 @@ class Monitor: NSObject, NSApplicationDelegate {
             menu.addItem(NSMenuItem.separator())
         }
 
-        usage(menu); footer(menu); statusItem.menu = menu
+        usage(menu); footer(menu); statusItem.menu = menu; updateOverlay()
     }
 
     private func sessionRow(_ s: Session, menu: NSMenu) {
         let displayName = s.name.isEmpty ? (pendingNames.contains(s.sid) ? "Naming..." : "Session") : s.name
-
         let row = NSMutableAttributedString()
-
-        // State dot
         let dot: String; let dotColor: NSColor
         switch s.state {
         case "active":  dot = "\u{25CF} "; dotColor = activeGreen
         case "waiting": dot = "\u{25CF} "; dotColor = waitingAmber
-        default:        dot = "\u{25CB} "; dotColor = NSColor(white: 0.45, alpha: 1)
-        }
+        default:        dot = "\u{25CB} "; dotColor = NSColor(white: 0.45, alpha: 1) }
         row.append(a("  \(dot)", sz: 12, wt: .bold, cl: dotColor))
-
-        // Name + duration
         row.append(a(displayName, sz: 13, wt: .bold, cl: .white))
         row.append(a("  \(s.duration)", sz: 11, wt: .semibold, cl: NSColor(white: 0.5, alpha: 1), mono: true))
 
-        // Metadata: context %
-        var meta: [NSAttributedString] = []
-
         if s.contextPct > 0 {
             let ctxColor = s.contextPct >= 80 ? coral : s.contextPct >= 60 ? ctxWarn : NSColor(white: 0.45, alpha: 1)
-            meta.append(a("ctx \(s.contextPct)%", sz: 10, wt: .semibold, cl: ctxColor, mono: true))
-        }
-        if !meta.isEmpty {
-            row.append(a("  ", sz: 10, wt: .regular, cl: .clear))
-            for (i, m) in meta.enumerated() {
-                row.append(m)
-                if i < meta.count - 1 { row.append(a(" \u{00B7} ", sz: 9, wt: .regular, cl: NSColor(white: 0.35, alpha: 1))) }
-            }
+            row.append(a("  ctx \(s.contextPct)%", sz: 10, wt: .semibold, cl: ctxColor, mono: true))
         }
 
-        // Line 2: Smart context (Haiku) or raw context
+        // Smart context line
         let ctxText: String
-        if !s.smartContext.isEmpty {
-            ctxText = s.smartContext
-        } else if !s.context.isEmpty {
-            ctxText = s.context
-        } else if s.state == "waiting" {
-            ctxText = "Waiting for your input"
-        } else {
-            ctxText = "Starting up..."
-        }
+        if !s.smartContext.isEmpty { ctxText = s.smartContext }
+        else if !s.context.isEmpty { ctxText = s.context }
+        else if s.state == "waiting" { ctxText = "Waiting for your input" }
+        else { ctxText = "Starting up..." }
+        let ctxColor: NSColor = s.smartContext.isEmpty ? NSColor(white: 0.55, alpha: 1) : NSColor(red: 0.55, green: 0.6, blue: 0.85, alpha: 1)
         row.append(NSAttributedString(string: "\n", attributes: [.font: NSFont.systemFont(ofSize: 3)]))
-        row.append(a("     \(ctxText)", sz: 12, wt: .medium, cl: NSColor(white: 0.70, alpha: 1)))
+        row.append(a("     \(ctxText)", sz: 12, wt: .medium, cl: ctxColor))
 
         let mi = NSMenuItem(title: "", action: #selector(openTerm(_:)), keyEquivalent: "")
         mi.target = self; mi.representedObject = s.tty; mi.attributedTitle = row
         mi.isEnabled = true; menu.addItem(mi)
 
-        // "Wrap Up" button -- only show for waiting/idle sessions
         if s.state == "waiting" || s.state.isEmpty {
             let wrap = NSMenuItem(title: "", action: #selector(wrapUpSession(_:)), keyEquivalent: "")
-            wrap.target = self
-            wrap.representedObject = ["tty": s.tty, "name": displayName]
+            wrap.target = self; wrap.representedObject = ["tty": s.tty, "name": displayName]
             wrap.attributedTitle = a("     \u{23FB} Send command...", sz: 11, wt: .medium, cl: NSColor(white: 0.50, alpha: 1))
             menu.addItem(wrap)
         }
@@ -550,17 +870,13 @@ class Monitor: NSObject, NSApplicationDelegate {
         guard let info = sender.representedObject as? [String: String],
               let tty = info["tty"], !tty.isEmpty else { return }
         let name = info["name"] ?? "this session"
-
         let alert = NSAlert()
         alert.messageText = "Send command to \"\(name)\""
         alert.informativeText = "Type a message or command to send to this session:"
-        alert.addButton(withTitle: "Send")
-        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Send"); alert.addButton(withTitle: "Cancel")
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
         field.placeholderString = "e.g. summarize what you did, or /compact"
-        alert.accessoryView = field
-        alert.alertStyle = .informational
-
+        alert.accessoryView = field; alert.alertStyle = .informational
         NSApp.activate(ignoringOtherApps: true)
         if alert.runModal() == .alertFirstButtonReturn && !field.stringValue.isEmpty {
             typeInTerminal(tty: tty, text: field.stringValue)
@@ -568,7 +884,7 @@ class Monitor: NSObject, NSApplicationDelegate {
     }
 
     private func typeInTerminal(tty: String, text: String) {
-        let escapedText = text.replacingOccurrences(of: "\"", with: "\\\"")
+        let escaped = text.replacingOccurrences(of: "\"", with: "\\\"")
         let script = """
         tell application "Terminal"
             activate
@@ -584,13 +900,12 @@ class Monitor: NSObject, NSApplicationDelegate {
         delay 0.3
         tell application "System Events"
             tell process "Terminal"
-                keystroke "\(escapedText)"
+                keystroke "\(escaped)"
                 keystroke return
             end tell
         end tell
         """
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
         p.arguments = ["-e", script]
         p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
         try? p.run()
@@ -598,24 +913,7 @@ class Monitor: NSObject, NSApplicationDelegate {
 
     @objc private func openTerm(_ sender: NSMenuItem) {
         guard let tty = sender.representedObject as? String, !tty.isEmpty else { return }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        p.arguments = ["-e", """
-        tell application "Terminal"
-            activate
-            repeat with w in windows
-                repeat with t in tabs of w
-                    if tty of t is "/dev/\(tty)" then
-                        set selected tab of w to t
-                        set index of w to 1
-                        return
-                    end if
-                end repeat
-            end repeat
-        end tell
-        """]
-        p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
-        try? p.run()
+        jumpToSession(Session(pid: "", project: "", branch: "", dir: "", duration: "", tty: tty, lastCommit: "", context: "", name: "", sid: "", modifiedFiles: 0, state: "", contextPct: 0, smartContext: ""))
     }
 
     // MARK: - Branch Splitting
@@ -624,7 +922,6 @@ class Monitor: NSObject, NSApplicationDelegate {
         guard let infos = sender.representedObject as? [[String: String]],
               infos.count > 1, let dir = infos.first?["dir"],
               let baseBranch = infos.first?["branch"], !baseBranch.isEmpty else { return }
-
         var commands = ["# Run in each terminal after exiting Claude:\n"]
         var created: [String] = []
         for (i, info) in infos.enumerated() {
@@ -633,8 +930,7 @@ class Monitor: NSObject, NSApplicationDelegate {
                 .replacingOccurrences(of: "&", with: "and").filter { $0.isLetter || $0.isNumber || $0 == "-" }.prefix(30))
             let branch = "\(baseBranch)-\(slug)"
             if i == 0 { commands += ["# \(raw): stays on \(baseBranch)\n"]; continue }
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            let proc = Process(); proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
             proc.arguments = ["-C", dir, "branch", branch, baseBranch]
             proc.standardOutput = FileHandle.nullDevice; proc.standardError = FileHandle.nullDevice
             try? proc.run(); proc.waitUntilExit()
@@ -642,9 +938,7 @@ class Monitor: NSObject, NSApplicationDelegate {
         }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(commands.joined(separator: "\n"), forType: .string)
-        let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        p.arguments = ["-e", "display notification \"Created \(created.count) branches. Commands copied.\" with title \"Branches Split\" sound name \"Glass\""]
-        p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice; try? p.run()
+        notify(title: "Branches Split", body: "Created \(created.count) branches. Commands copied.", sound: "Glass")
     }
 
     // MARK: - Usage
@@ -659,7 +953,6 @@ class Monitor: NSObject, NSApplicationDelegate {
         bar("Session", pct: Int(fh?["utilization"] as? Double ?? 0), reset: fmtReset(fh?["resets_at"] as? String), menu: menu)
         bar("Weekly ", pct: weeklyPct, reset: fmtDay(sd?["resets_at"] as? String), menu: menu)
 
-        // Show weekly delta (how much was added today)
         let startPath = "\(home)/.claude/.weekly_start_pct"
         var infoLine = ""
         if let startStr = try? String(contentsOfFile: startPath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
@@ -668,7 +961,6 @@ class Monitor: NSObject, NSApplicationDelegate {
             if delta > 0 { infoLine += "+\(delta)% today" }
         }
 
-        // Haiku monitor overhead — show % impact, not $ (Max plan)
         if enableHaiku && haikuCallCount > 0 {
             let sep = infoLine.isEmpty ? "" : "  \u{00B7}  "
             let pctImpact = Double(haikuCallCount) * 0.01
@@ -699,20 +991,24 @@ class Monitor: NSObject, NSApplicationDelegate {
         let r = NSMenuItem(title: "Refresh", action: #selector(refresh), keyEquivalent: "r")
         r.target = self; menu.addItem(r)
 
-        // Settings submenu
         let settingsMenu = NSMenu()
 
         let waitItem = NSMenuItem(title: notifyWaiting ? "\u{2713} Waiting Alerts" : "   Waiting Alerts", action: #selector(toggleWaiting), keyEquivalent: "")
         waitItem.target = self; settingsMenu.addItem(waitItem)
-
         let ctxItem = NSMenuItem(title: notifyContext ? "\u{2713} Context Warnings" : "   Context Warnings", action: #selector(toggleContext), keyEquivalent: "")
         ctxItem.target = self; settingsMenu.addItem(ctxItem)
-
         let soundItem = NSMenuItem(title: notifySound ? "\u{2713} Notification Sounds" : "   Notification Sounds", action: #selector(toggleSound), keyEquivalent: "")
         soundItem.target = self; settingsMenu.addItem(soundItem)
-
-        let haikuItem = NSMenuItem(title: enableHaiku ? "\u{2713} AI Session Names" : "   AI Session Names", action: #selector(toggleHaiku), keyEquivalent: "")
+        let haikuItem = NSMenuItem(title: enableHaiku ? "\u{2713} AI Session Names + Context" : "   AI Session Names + Context", action: #selector(toggleHaiku), keyEquivalent: "")
         haikuItem.target = self; settingsMenu.addItem(haikuItem)
+
+        settingsMenu.addItem(NSMenuItem.separator())
+
+        let overlayItem = NSMenuItem(title: showOverlay ? "\u{2713} Show Overlay Widget" : "   Show Overlay Widget", action: #selector(toggleOverlay), keyEquivalent: "")
+        overlayItem.target = self; settingsMenu.addItem(overlayItem)
+
+        let compactItem = NSMenuItem(title: overlayCompact ? "\u{2713} Compact Overlay" : "   Compact Overlay", action: #selector(toggleCompactOverlay), keyEquivalent: "")
+        compactItem.target = self; settingsMenu.addItem(compactItem)
 
         settingsMenu.addItem(NSMenuItem.separator())
 
@@ -732,21 +1028,22 @@ class Monitor: NSObject, NSApplicationDelegate {
     @objc private func toggleContext() { notifyContext.toggle(); build() }
     @objc private func toggleSound() { notifySound.toggle(); build() }
     @objc private func toggleHaiku() { enableHaiku.toggle(); build() }
+    @objc private func toggleOverlay() { showOverlay.toggle(); updateOverlay(); build() }
+    @objc private func toggleCompactOverlay() {
+        overlayCompact.toggle(); overlayView.compact = overlayCompact; updateOverlay(); build()
+    }
 
     @objc private func toggleAutoLaunch() {
         let launchAgentDir = "\(home)/Library/LaunchAgents"
         let plistPath = "\(launchAgentDir)/com.claude.monitor.plist"
         let fm = FileManager.default
-
         if fm.fileExists(atPath: plistPath) {
-            // Uninstall
             let p = Process(); p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
             p.arguments = ["unload", plistPath]; p.standardOutput = FileHandle.nullDevice
             p.standardError = FileHandle.nullDevice; try? p.run(); p.waitUntilExit()
             try? fm.removeItem(atPath: plistPath)
             notify(title: "Claude Monitor", body: "Removed from Login Items", sound: "Tink")
         } else {
-            // Install
             try? fm.createDirectory(atPath: launchAgentDir, withIntermediateDirectories: true)
             let appPath = "\(home)/.claude/ClaudeMonitor.app"
             let plist = """
@@ -754,10 +1051,7 @@ class Monitor: NSObject, NSApplicationDelegate {
             <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
             <plist version="1.0"><dict>
                 <key>Label</key><string>com.claude.monitor</string>
-                <key>ProgramArguments</key><array>
-                    <string>/usr/bin/open</string>
-                    <string>\(appPath)</string>
-                </array>
+                <key>ProgramArguments</key><array><string>/usr/bin/open</string><string>\(appPath)</string></array>
                 <key>RunAtLoad</key><true/>
                 <key>StandardOutPath</key><string>/dev/null</string>
                 <key>StandardErrorPath</key><string>/dev/null</string>
@@ -778,12 +1072,9 @@ class Monitor: NSObject, NSApplicationDelegate {
             .font: mono ? NSFont.monospacedSystemFont(ofSize: sz, weight: wt) : NSFont.systemFont(ofSize: sz, weight: wt),
             .foregroundColor: cl])
     }
-    private func txt(_ s: String, sz: CGFloat, wt: NSFont.Weight, cl: NSColor, menu: NSMenu) {
-        item(a(s, sz: sz, wt: wt, cl: cl), menu: menu)
-    }
+    private func txt(_ s: String, sz: CGFloat, wt: NSFont.Weight, cl: NSColor, menu: NSMenu) { item(a(s, sz: sz, wt: wt, cl: cl), menu: menu) }
     private func item(_ attr: NSAttributedString, menu: NSMenu) {
-        let i = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-        i.attributedTitle = attr; i.isEnabled = false; menu.addItem(i)
+        let i = NSMenuItem(title: "", action: nil, keyEquivalent: ""); i.attributedTitle = attr; i.isEnabled = false; menu.addItem(i)
     }
     private func fmtReset(_ s: String?) -> String? {
         guard let s, let d = iso(s) else { return nil }
