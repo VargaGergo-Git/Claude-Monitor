@@ -147,6 +147,15 @@ function Configure-Settings {
     if ($existing.hooks) {
         Write-Warn "Hooks already configured in settings.json -- not overwriting"
         Write-Warn "Compare with windows/settings-template.json to see what's new"
+
+        # Still merge statusLine if it's missing
+        if (-not $existing.statusLine -and $template.statusLine) {
+            $backup = "$Settings.pre-monitor-statusline-backup"
+            Copy-Item $Settings $backup -Force
+            $existing | Add-Member -NotePropertyName "statusLine" -NotePropertyValue $template.statusLine -Force
+            $existing | ConvertTo-Json -Depth 10 | Set-Content $Settings
+            Write-Ok "Added missing statusLine to settings.json (backup: $backup)"
+        }
         return
     }
 

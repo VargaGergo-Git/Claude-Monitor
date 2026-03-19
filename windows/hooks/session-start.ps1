@@ -83,3 +83,5 @@ try {
 if ($msg) {
     @{ systemMessage = $msg } | ConvertTo-Json -Compress
 }
+
+exit 0

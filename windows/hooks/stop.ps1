@@ -67,3 +67,5 @@ try {
         Pop-Location
     }
 } catch { Pop-Location }
+
+exit 0
