@@ -2,6 +2,12 @@
   "_comment": "Claude Monitor (Windows) — merge these settings into your ~/.claude/settings.json",
   "_instructions": "Run: install.ps1 to auto-merge, or copy sections manually",
 
+  "statusLine": {
+    "type": "command",
+    "command": "powershell -ExecutionPolicy Bypass -File %USERPROFILE%\\.claude\\statusline.ps1",
+    "padding": 4
+  },
+
   "hooks": {
     "PreToolUse": [
       {

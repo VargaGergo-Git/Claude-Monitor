@@ -1,8 +1,20 @@
 # Claude Monitor
 
-A macOS menu bar app + hook system for monitoring Claude Code sessions in real time.
+A menu bar / system tray app + hook system for monitoring Claude Code sessions in real time. Works on **macOS** and **Windows**.
 
-See what every session is doing, get notified when Claude needs your input, track API usage, and get human-readable descriptions of every tool call — all from your menu bar.
+See what every session is doing, get notified when Claude needs your input, track API usage, and get human-readable descriptions of every tool call — all from your menu bar or system tray.
+
+## Quick Install
+
+**macOS:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/VargaGergo-Git/Claude-Monitor/main/setup.sh | bash
+```
+
+**Windows** (PowerShell):
+```powershell
+irm https://raw.githubusercontent.com/VargaGergo-Git/Claude-Monitor/main/setup.ps1 | iex
+```
 
 ## What You Get
 
@@ -226,15 +238,16 @@ All colors in `statusline.sh` use RGB escape codes. Edit the palette section to 
 | Feature | macOS | Windows |
 |---------|-------|---------|
 | App type | Native Swift menu bar app | PowerShell system tray |
-| AI session names | Yes (via Haiku API) | Not yet (planned) |
-| Smart context summaries | Yes (via Haiku API) | Not yet (planned) |
+| AI session names | Yes (via Haiku API) | Yes (via Haiku API) |
+| Smart context summaries | Yes (via Haiku API) | Yes (via Haiku API) |
 | Terminal tab renaming | Yes (Apple Terminal) | Not yet |
-| Status line | Yes (bash) | Not yet (planned) |
+| Status line | Yes (bash) | Yes (PowerShell) |
 | Branch splitting | Yes (one-click) | Not yet |
 | Toast notifications | Yes (via osascript) | Yes (via WinForms) |
 | Session tracking | Yes | Yes |
 | All 11 hooks | bash (.sh) | PowerShell (.ps1) |
 | Launch at login | Yes (LaunchAgent) | Yes (Startup folder) |
+| Credentials | macOS Keychain | Windows Credential Manager |
 
 ## Troubleshooting
 

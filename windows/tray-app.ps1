@@ -27,6 +27,49 @@ function Set-Setting($Name, $Value) {
 $script:NotifyWaiting = [bool](Get-Setting "NotifyWaiting" 1)
 $script:NotifyContext = [bool](Get-Setting "NotifyContext" 1)
 $script:NotifySound = [bool](Get-Setting "NotifySound" 1)
+$script:EnableHaiku = [bool](Get-Setting "EnableHaiku" 1)
+
+# Haiku API state
+$script:CachedToken = $null
+$script:PendingNames = [System.Collections.Generic.HashSet[string]]::new()
+$script:SmartCtxCache = @{}
+$script:LastCtxHash = @{}
+$script:PendingCtx = [System.Collections.Generic.HashSet[string]]::new()
+$script:HaikuCallCount = [int](Get-Setting "HaikuCalls" 0)
+$script:HaikuTokensUsed = [int](Get-Setting "HaikuTokens" 0)
+
+# ── Windows Credential Manager (P/Invoke) ────────────────────
+try {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class WinCred {
+    [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+    public static extern bool CredRead(string target, int type, int reserved, out IntPtr cred);
+    [DllImport("advapi32.dll")]
+    public static extern void CredFree(IntPtr cred);
+    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+    public struct CREDENTIAL {
+        public int Flags; public int Type;
+        public string TargetName; public string Comment;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
+        public int CredentialBlobSize; public IntPtr CredentialBlob;
+        public int Persist; public int AttributeCount;
+        public IntPtr Attributes; public string TargetAlias; public string UserName;
+    }
+    public static string GetPassword(string target) {
+        IntPtr ptr;
+        if (!CredRead(target, 1, 0, out ptr)) return null;
+        var cred = (CREDENTIAL)Marshal.PtrToStructure(ptr, typeof(CREDENTIAL));
+        string pass = null;
+        if (cred.CredentialBlobSize > 0)
+            pass = Marshal.PtrToStringUni(cred.CredentialBlob, cred.CredentialBlobSize / 2);
+        CredFree(ptr);
+        return pass;
+    }
+}
+"@ -ErrorAction SilentlyContinue
+} catch {}
 
 # ── Toast Notifications ─────────────────────────────────────
 function Show-Notification($Title, $Body) {
@@ -46,6 +89,140 @@ function Load-NameCache {
                 $script:NameCache[$parts[0]] = $parts[1]
             }
         }
+    }
+}
+
+function Save-NameToCache($sid, $name) {
+    $script:NameCache[$sid] = $name
+    $path = Join-Path $script:ClaudeDir ".session_names"
+    Add-Content -Path $path -Value "$sid|$name" -ErrorAction SilentlyContinue
+}
+
+# ── Haiku API ────────────────────────────────────────────────
+function Get-OAuthToken {
+    if ($script:CachedToken) { return $script:CachedToken }
+    try {
+        $credJson = [WinCred]::GetPassword("Claude Code-credentials")
+        if ($credJson) {
+            $credObj = $credJson | ConvertFrom-Json
+            $token = $credObj.claudeAiOauth.accessToken
+            if ($token) { $script:CachedToken = $token; return $token }
+        }
+    } catch {}
+    return $null
+}
+
+function Invoke-Haiku($prompt, $maxTokens) {
+    $token = Get-OAuthToken
+    if (-not $token) { return $null }
+
+    try {
+        $body = @{
+            model = "claude-haiku-4-5-20251001"
+            max_tokens = $maxTokens
+            messages = @(@{ role = "user"; content = $prompt })
+        } | ConvertTo-Json -Depth 3
+
+        $headers = @{
+            "Authorization"    = "Bearer $token"
+            "anthropic-beta"   = "oauth-2025-04-20"
+            "anthropic-version" = "2023-06-01"
+            "content-type"     = "application/json"
+        }
+
+        $resp = Invoke-RestMethod -Uri "https://api.anthropic.com/v1/messages" `
+            -Method Post -Headers $headers -Body $body -TimeoutSec 8
+
+        if ($resp.content -and $resp.content[0].text) {
+            # Track usage
+            if ($resp.usage) {
+                $script:HaikuCallCount++
+                $script:HaikuTokensUsed += ($resp.usage.input_tokens + $resp.usage.output_tokens)
+                Set-Setting "HaikuCalls" $script:HaikuCallCount
+                Set-Setting "HaikuTokens" $script:HaikuTokensUsed
+            }
+            return $resp.content[0].text
+        }
+    } catch {}
+    return $null
+}
+
+function Resolve-Names {
+    if (-not $script:EnableHaiku) { return }
+    foreach ($session in $script:Sessions) {
+        $sid = $session.Sid
+        if ($session.Name -or -not $sid) { continue }
+        if ($script:PendingNames.Contains($sid)) { continue }
+        $script:PendingNames.Add($sid) | Out-Null
+
+        # Find session JSONL
+        $projectHash = $session.Dir -replace '[/\\]', '-' -replace ' ', '-'
+        $jsonlPath = Join-Path $script:ClaudeDir "projects\$projectHash\$sid.jsonl"
+        if (-not (Test-Path $jsonlPath)) {
+            $script:PendingNames.Remove($sid) | Out-Null
+            continue
+        }
+
+        $rawMsg = ""
+        Get-Content $jsonlPath -TotalCount 200 | ForEach-Object {
+            if ($rawMsg) { return }
+            try {
+                $obj = $_ | ConvertFrom-Json
+                if ($obj.type -eq "user" -and $obj.message.content -and
+                    -not $obj.message.content.StartsWith("<") -and $obj.message.content.Length -gt 5) {
+                    $rawMsg = $obj.message.content.Substring(0, [Math]::Min($obj.message.content.Length, 200))
+                }
+            } catch {}
+        }
+
+        if (-not $rawMsg) {
+            $script:PendingNames.Remove($sid) | Out-Null
+            continue
+        }
+
+        $name = Invoke-Haiku "Give a 2-5 word title for this coding task. Reply ONLY the title. Task: $rawMsg" 15
+        if (-not $name) {
+            $name = ($rawMsg -split "`n")[0]
+            if ($name.Length -gt 35) { $name = $name.Substring(0, 35) }
+        }
+        Save-NameToCache $sid $name
+        $script:PendingNames.Remove($sid) | Out-Null
+    }
+}
+
+function Resolve-SmartContexts {
+    if (-not $script:EnableHaiku) { return }
+    foreach ($session in $script:Sessions) {
+        $sid = $session.Sid
+        if (-not $sid) { continue }
+        if ($script:PendingCtx.Contains($sid)) { continue }
+
+        $logPath = Join-Path $script:ClaudeDir ".ctxlog_$sid"
+        if (-not (Test-Path $logPath)) { continue }
+        $logData = (Get-Content $logPath -Raw -ErrorAction SilentlyContinue)
+        if (-not $logData -or -not $logData.Trim()) { continue }
+
+        $hash = $logData.GetHashCode().ToString()
+        if ($script:LastCtxHash.ContainsKey($sid) -and $script:LastCtxHash[$sid] -eq $hash) { continue }
+        $script:LastCtxHash[$sid] = $hash
+        $script:PendingCtx.Add($sid) | Out-Null
+
+        $actions = ($logData -split "`n" | Select-Object -Last 6) -join ", "
+
+        # Git diff for richer context
+        $diffStat = ""
+        if ($session.Dir) {
+            try {
+                Push-Location $session.Dir
+                $diff = git diff --stat HEAD 2>$null
+                if ($diff) { $diffStat = ", Git changes: $(($diff -split "`n" | Select-Object -Last 1).Trim())" }
+                Pop-Location
+            } catch { Pop-Location }
+        }
+
+        $summary = Invoke-Haiku "What is this coding session doing RIGHT NOW? Recent actions: $actions$diffStat. Reply in 5-10 words, present tense, specific. No quotes." 25
+        if ($summary) { $script:SmartCtxCache[$sid] = $summary }
+        $script:PendingCtx.Remove($sid) | Out-Null
     }
 }
 
@@ -170,6 +347,8 @@ function Scan-Sessions {
 
         $name = if ($script:NameCache.ContainsKey($sid)) { $script:NameCache[$sid] } else { "" }
 
+        $smartCtx = if ($script:SmartCtxCache.ContainsKey($sid)) { $script:SmartCtxCache[$sid] } else { "" }
+
         $results += [PSCustomObject]@{
             Sid = $sid
             Project = $project
@@ -182,10 +361,12 @@ function Scan-Sessions {
             ModifiedFiles = $modified
             LastCommit = $lastCommit
             Name = $name
+            SmartContext = $smartCtx
         }
     }
 
     $script:Sessions = $results
+    Resolve-Names
     Check-Notifications
 }
 
@@ -294,8 +475,9 @@ function Build-Menu {
                 }
                 $sessionItem.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
 
-                # Context line
-                $ctxText = if ($session.Context) { $session.Context }
+                # Context line — prefer Haiku smart context, then raw context
+                $ctxText = if ($session.SmartContext) { $session.SmartContext }
+                    elseif ($session.Context) { $session.Context }
                     elseif ($session.State -eq "waiting") { "Waiting for your input" }
                     else { "Starting up..." }
 
@@ -330,6 +512,14 @@ function Build-Menu {
             $weekItem.Enabled = $false
             $weekItem.Font = New-Object System.Drawing.Font("Cascadia Mono", 9)
             $weekItem.ForeColor = Get-UsageColor $weekPct
+
+            # Haiku overhead
+            if ($script:EnableHaiku -and $script:HaikuCallCount -gt 0) {
+                $haikuInfo = $menu.Items.Add("  Monitor: $($script:HaikuCallCount) Haiku calls, ~$($script:HaikuTokensUsed) tok")
+                $haikuInfo.Enabled = $false
+                $haikuInfo.ForeColor = [System.Drawing.Color]::FromArgb(100, 100, 120)
+                $haikuInfo.Font = New-Object System.Drawing.Font("Segoe UI", 8)
+            }
         } catch {}
     }
 
@@ -359,6 +549,15 @@ function Build-Menu {
         $this.Checked = $script:NotifyContext
     })
     $settingsMenu.DropDownItems.Add($ctxCheck) | Out-Null
+
+    $haikuCheck = New-Object System.Windows.Forms.ToolStripMenuItem("AI Session Names")
+    $haikuCheck.Checked = $script:EnableHaiku
+    $haikuCheck.Add_Click({
+        $script:EnableHaiku = -not $script:EnableHaiku
+        Set-Setting "EnableHaiku" ([int]$script:EnableHaiku)
+        $this.Checked = $script:EnableHaiku
+    })
+    $settingsMenu.DropDownItems.Add($haikuCheck) | Out-Null
 
     # Startup toggle
     $startupPath = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup\ClaudeMonitor.lnk"
@@ -451,6 +650,17 @@ $scanTimer.Add_Tick({
     Build-Menu
 })
 $scanTimer.Start()
+
+# Haiku smart context every 45 seconds
+$haikuTimer = New-Object System.Windows.Forms.Timer
+$haikuTimer.Interval = 45000
+$haikuTimer.Add_Tick({
+    if ($script:EnableHaiku) {
+        Resolve-SmartContexts
+        Build-Menu
+    }
+})
+$haikuTimer.Start()
 
 # Run the app
 [System.Windows.Forms.Application]::Run()

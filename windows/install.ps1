@@ -80,6 +80,32 @@ function Install-Hooks {
     Write-Ok "Hooks: $installed installed, $skipped already up-to-date"
 }
 
+# ── Install statusline ───────────────────────────────────
+function Install-Statusline {
+    Write-Info "Installing statusline..."
+
+    $src = Join-Path $ScriptDir "statusline.ps1"
+    $dst = Join-Path $ClaudeDir "statusline.ps1"
+
+    if (-not (Test-Path $src)) {
+        Write-Warn "statusline.ps1 not found — skipping"
+        return
+    }
+
+    if ((Test-Path $dst) -and (Get-FileHash $src).Hash -eq (Get-FileHash $dst).Hash) {
+        Write-Ok "Statusline already up-to-date"
+        return
+    }
+
+    if (Test-Path $dst) {
+        Copy-Item $dst "$dst.backup" -Force
+        Write-Warn "Backed up existing statusline.ps1"
+    }
+
+    Copy-Item $src $dst -Force
+    Write-Ok "Statusline installed"
+}
+
 # ── Configure settings.json ──────────────────────────────
 function Configure-Settings {
     Write-Info "Configuring settings.json..."
@@ -154,11 +180,13 @@ start /min powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File "%USERPR
 switch ($Mode) {
     "full" {
         Install-Hooks
+        Install-Statusline
         Configure-Settings
         Install-App
     }
     "hooks" {
         Install-Hooks
+        Install-Statusline
         Configure-Settings
     }
     "app" {
@@ -173,6 +201,7 @@ Write-Host ""
 if ($Mode -ne "app") {
     Write-Host "What was installed:"
     Write-Host "  Hooks (11)     $HooksDir"
+    Write-Host "  Statusline     $ClaudeDir\statusline.ps1"
     Write-Host "  Settings       $Settings"
     Write-Host ""
 }
