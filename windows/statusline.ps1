@@ -5,7 +5,14 @@
 # "statusLine": { "type": "command", "command": "powershell -ExecutionPolicy Bypass -File %USERPROFILE%\\.claude\\statusline.ps1", "padding": 4 }
 $ErrorActionPreference = "SilentlyContinue"
 
-$InputData = [Console]::In.ReadToEnd()
+# Force UTF-8 output so Unicode progress bars and symbols render correctly.
+# PS 5.1 defaults to the OEM code page which corrupts them.
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
+$InputData = ""
+if ([Console]::IsInputRedirected) {
+    $InputData = [Console]::In.ReadToEnd()
+}
 $json = $InputData | ConvertFrom-Json
 if (-not $json) { exit }
 
