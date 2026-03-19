@@ -42,54 +42,90 @@ A rich two-line status bar showing project, model, git branch, context usage, se
 
 ## Requirements
 
+### macOS
 - macOS 14.0+ (Sonoma or later)
 - Claude Code CLI
 - `jq` (`brew install jq`)
 - Xcode Command Line Tools (for building the app — `xcode-select --install`)
 - Claude Code Max plan or API key with OAuth (for usage tracking + AI session names)
 
+### Windows
+- Windows 10+
+- PowerShell 5.1+ (included with Windows)
+- Claude Code CLI
+- `jq` (optional but recommended — `winget install jqlang.jq`)
+
 ## Install
 
+### macOS
+
 ```bash
-git clone https://github.com/vargagergo/claude-monitor.git
-cd claude-monitor
+git clone https://github.com/VargaGergo-Git/Claude-Monitor.git
+cd Claude-Monitor
 chmod +x install.sh
 ./install.sh
 ```
 
 This installs everything: menu bar app + all 11 hooks + status line + settings.
 
-### Partial Install
-
+**Partial install:**
 ```bash
-# Hooks + statusline only (no menu bar app)
-./install.sh --hooks
+./install.sh --hooks   # Hooks + statusline only (no menu bar app)
+./install.sh --app     # Menu bar app only (no hooks)
+```
 
-# Menu bar app only (no hooks)
-./install.sh --app
+### Windows
+
+```powershell
+git clone https://github.com/VargaGergo-Git/Claude-Monitor.git
+cd Claude-Monitor\windows
+powershell -ExecutionPolicy Bypass -File install.ps1
+```
+
+This installs: system tray app + all 11 PowerShell hooks + settings.
+
+**Partial install:**
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1 -Mode hooks   # Hooks only
+powershell -ExecutionPolicy Bypass -File install.ps1 -Mode app     # Tray app only
 ```
 
 ### Manual Install
 
 If you prefer to pick and choose:
 
+**macOS:**
 1. Copy hooks you want to `~/.claude/hooks/`
 2. Copy `statusline/statusline.sh` to `~/.claude/statusline.sh`
 3. Merge hook entries from `settings-template.json` into your `~/.claude/settings.json`
 4. Run `app/build.sh` to build and launch the menu bar app
 
+**Windows:**
+1. Copy `.ps1` hooks from `windows/hooks/` to `%USERPROFILE%\.claude\hooks\`
+2. Merge hook entries from `windows/settings-template.json` into your settings
+3. Copy `windows/tray-app.ps1` to `%USERPROFILE%\.claude\`
+4. Run: `powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File %USERPROFILE%\.claude\tray-app.ps1`
+
 ## Uninstall
 
+**macOS:**
 ```bash
 ./uninstall.sh
 ```
 
-Removes the app, hooks, statusline, and temp files. Your `settings.json` is left intact (with a note to remove hook entries manually).
+**Windows:**
+```powershell
+powershell -ExecutionPolicy Bypass -File windows\uninstall.ps1
+```
+
+Removes the app, hooks, and temp files. Your `settings.json` is left intact (with a note to remove hook entries manually).
 
 ## How It Works
 
 ### Session Discovery
-The menu bar app scans running processes every 10 seconds, finding `claude` processes and mapping them to Terminal tabs via TTY. Session IDs are linked to TTYs by the hooks (specifically `insights.sh` and `session-start.sh`), which write `.tty_map_*` files that the app reads.
+**macOS:** The menu bar app scans running processes every 10 seconds, finding `claude` processes and mapping them to Terminal tabs via TTY. Session IDs are linked to TTYs by the hooks (specifically `insights.sh` and `session-start.sh`), which write `.tty_map_*` files that the app reads.
+
+**Windows:** The PowerShell tray app reads `.state_*` and `.sessions.json` files written by the hooks. It also checks for Claude processes via `Get-CimInstance` and can detect sessions running in WSL.
 
 ### State Tracking
 - **Active**: `insights.sh` writes `active` to `.state_{session_id}` on every tool call
@@ -108,6 +144,7 @@ The status line fetches your Claude API usage every 5 minutes via the OAuth API 
 
 ## File Structure
 
+### macOS
 ```
 ~/.claude/
 ├── ClaudeMonitor.app         # Menu bar app (built by installer)
@@ -144,6 +181,28 @@ The status line fetches your Claude API usage every 5 minutes via the OAuth API 
 └── .build_failures.log       # Recent build failure log
 ```
 
+### Windows
+```
+%USERPROFILE%\.claude\
+├── tray-app.ps1              # System tray app (PowerShell)
+├── ClaudeMonitor.bat         # Launcher script
+├── hooks\
+│   ├── insights.ps1          # PreToolUse — human-friendly narration
+│   ├── session-start.ps1     # SessionStart — session tracking
+│   ├── stop.ps1              # Stop — mark waiting, auto-handoff
+│   ├── notify.ps1            # Notification — Windows toast alerts
+│   ├── post-commit.ps1       # PostToolUse — commit celebration
+│   ├── agent-start.ps1       # SubagentStart — agent tracking
+│   ├── agent-stop.ps1        # SubagentStop — agent tracking
+│   ├── track-reads.ps1       # PostToolUse — file read tracking
+│   ├── read-before-edit.ps1  # PreToolUse — edit safety gate
+│   ├── pre-compact.ps1       # PreCompact — context reminder
+│   └── learn-from-failure.ps1 # PostToolUseFailure — error logging
+│
+│ # Same temp files as macOS (shared format)
+├── .state_{sid}, .ctx_{sid}, .sessions.json, etc.
+```
+
 ## Customization
 
 ### insights.sh — File Descriptions
@@ -162,7 +221,24 @@ Edit `notify.sh` to change sounds per event type. Available sounds: `Tink`, `Gla
 ### Status Line Colors
 All colors in `statusline.sh` use RGB escape codes. Edit the palette section to match your terminal theme.
 
+## Platform Differences
+
+| Feature | macOS | Windows |
+|---------|-------|---------|
+| App type | Native Swift menu bar app | PowerShell system tray |
+| AI session names | Yes (via Haiku API) | Not yet (planned) |
+| Smart context summaries | Yes (via Haiku API) | Not yet (planned) |
+| Terminal tab renaming | Yes (Apple Terminal) | Not yet |
+| Status line | Yes (bash) | Not yet (planned) |
+| Branch splitting | Yes (one-click) | Not yet |
+| Toast notifications | Yes (via osascript) | Yes (via WinForms) |
+| Session tracking | Yes | Yes |
+| All 11 hooks | bash (.sh) | PowerShell (.ps1) |
+| Launch at login | Yes (LaunchAgent) | Yes (Startup folder) |
+
 ## Troubleshooting
+
+### macOS
 
 **"No active sessions" even though Claude is running**
 - The app finds sessions by looking for `claude` processes with a TTY. If you're using a non-standard terminal, the TTY mapping may not work.
@@ -176,6 +252,21 @@ All colors in `statusline.sh` use RGB escape codes. Edit the palette section to 
 - Verify hooks are in `settings.json`: `jq '.hooks' ~/.claude/settings.json`
 - Check that hook scripts are executable: `ls -la ~/.claude/hooks/`
 - Start a fresh Claude Code session (hooks are loaded at session start)
+
+### Windows
+
+**Tray app doesn't start**
+- Make sure you're running with: `powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File tray-app.ps1`
+- If your execution policy blocks scripts: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`
+
+**Hooks aren't firing**
+- Verify hooks are in `settings.json`: `Get-Content ~/.claude/settings.json | ConvertFrom-Json | Select -Expand hooks`
+- Make sure hook commands use the full `powershell -ExecutionPolicy Bypass -File ...` prefix
+- Start a fresh Claude Code session
+
+**Sessions not detected**
+- The Windows tray app discovers sessions via `.state_*` files written by hooks. Hooks must fire at least once.
+- If running Claude Code in WSL, the bash hooks from the `hooks/` directory work as-is — no need for the PowerShell versions.
 
 **App won't build**
 - Ensure Xcode Command Line Tools are installed: `xcode-select --install`
