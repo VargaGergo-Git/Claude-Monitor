@@ -59,6 +59,8 @@ A rich multi-line status bar inside your Claude Code terminal. Available for bot
 
 Shows: project name, model, git branch + dirty indicator, context usage bar, session/weekly API utilization bars with reset timers, effort level, fast mode toggle, and active agent count — all color-coded with ANSI progress bars.
 
+**No project needed to install.** You can set up Claude Monitor before your first Claude Code session — the app will show "No active sessions" and light up automatically once you start using Claude Code.
+
 ## Requirements
 
 ### macOS

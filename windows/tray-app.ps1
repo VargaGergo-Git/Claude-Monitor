@@ -637,6 +637,8 @@ $script:TrayIcon.Add_Click({
 })
 
 # ── Initial scan and timers ─────────────────────────────────
+# Ensure ~/.claude/ exists (works even before first Claude Code session)
+New-Item -ItemType Directory -Path $script:ClaudeDir -Force -ErrorAction SilentlyContinue | Out-Null
 Cleanup-StaleFiles
 Load-NameCache
 Scan-Sessions

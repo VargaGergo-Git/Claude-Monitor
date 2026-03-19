@@ -39,6 +39,8 @@ class Monitor: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ n: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        // Ensure ~/.claude/ exists (works even before first Claude Code session)
+        try? FileManager.default.createDirectory(atPath: "\(home)/.claude", withIntermediateDirectories: true)
         cleanupStaleFiles()
         loadNameCache()
         scan(); build()
