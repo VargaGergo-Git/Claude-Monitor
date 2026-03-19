@@ -10,6 +10,8 @@ struct Session {
     var agentCount: Int
     var agentDescs: [String]
     var weeklyAtStart: Int
+    var autoBranch: String
+    var parentBranch: String
 }
 
 // MARK: - Velocity Tracker
@@ -46,6 +48,9 @@ class VelocityTracker {
 // MARK: - Monitor
 
 class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate {
+
+    // MARK: - State
+
     private var statusItem: NSStatusItem!
     private var sessions: [Session] = []
     private let home = NSHomeDirectory()
@@ -61,6 +66,7 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
     private var sessPct = 0, weekPct = 0, opusPct = 0, sonnetPct = 0
     private var sessResetStr = "", weekResetStr = ""
     private var weekResetDate: Date?
+    private var previousSids = Set<String>()
 
     private let ud = UserDefaults.standard
     private var notifyWaiting: Bool { get { ud.object(forKey: "notifyWaiting") as? Bool ?? true } set { ud.set(newValue, forKey: "notifyWaiting") } }
@@ -68,8 +74,8 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
     private var notifySound: Bool { get { ud.object(forKey: "notifySound") as? Bool ?? true } set { ud.set(newValue, forKey: "notifySound") } }
     private var enableHaiku: Bool { get { ud.object(forKey: "enableHaiku") as? Bool ?? true } set { ud.set(newValue, forKey: "enableHaiku") } }
     private var renameTerminals: Bool { get { ud.object(forKey: "renameTerminals") as? Bool ?? true } set { ud.set(newValue, forKey: "renameTerminals") } }
+    private var autoMergeBranches: Bool { get { ud.object(forKey: "autoMerge") as? Bool ?? true } set { ud.set(newValue, forKey: "autoMerge") } }
 
-    // Palette — every color defined once
     let teal = NSColor(red: 0.31, green: 0.78, blue: 0.72, alpha: 1)
     let amber = NSColor(red: 0.92, green: 0.68, blue: 0.18, alpha: 1)
     let green = NSColor(red: 0.35, green: 0.82, blue: 0.52, alpha: 1)
@@ -86,6 +92,8 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
     private var haikuCallCount: Int { get { ud.integer(forKey: "haikuCalls") } set { ud.set(newValue, forKey: "haikuCalls") } }
     private var haikuTokensUsed: Int { get { ud.integer(forKey: "haikuTokens") } set { ud.set(newValue, forKey: "haikuTokens") } }
     private var cachedToken: String?
+
+    // MARK: - Lifecycle
 
     func applicationDidFinishLaunching(_ n: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -130,6 +138,74 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
         p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice; try? p.run()
     }
 
+    // MARK: - Branch Management
+
+    private func gitCmd(dir: String, _ args: String...) -> (ok: Bool, out: String) {
+        let pipe = Pipe(); let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        proc.arguments = ["-C", dir] + args
+        proc.standardOutput = pipe; proc.standardError = FileHandle.nullDevice
+        do { try proc.run() } catch { return (false, "") }
+        proc.waitUntilExit()
+        return (proc.terminationStatus == 0, String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
+    }
+
+    private func mergeSessionBranch(dir: String, autoBranch: String, parentBranch: String, sid: String, silent: Bool = false) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let (_, status) = self.gitCmd(dir: dir, "status", "--porcelain")
+            guard status.isEmpty else {
+                if !silent { DispatchQueue.main.async { self.sendNotification(title: "Can't Merge", body: "Uncommitted changes \u{2014} commit first") } }
+                return
+            }
+            let (_, cur) = self.gitCmd(dir: dir, "branch", "--show-current")
+            if cur != parentBranch { let _ = self.gitCmd(dir: dir, "checkout", parentBranch) }
+            let (merged, _) = self.gitCmd(dir: dir, "merge", autoBranch, "--no-edit")
+            if merged {
+                let _ = self.gitCmd(dir: dir, "branch", "-d", autoBranch)
+                try? FileManager.default.removeItem(atPath: "\(self.home)/.claude/.auto_branch_\(sid)")
+                try? FileManager.default.removeItem(atPath: "\(self.home)/.claude/.parent_branch_\(sid)")
+                DispatchQueue.main.async {
+                    self.sendNotification(title: "Merged", body: "\(autoBranch) \u{2192} \(parentBranch)", sound: "Glass")
+                    self.scan(); self.build()
+                }
+            } else {
+                let _ = self.gitCmd(dir: dir, "checkout", autoBranch)
+                if !silent { DispatchQueue.main.async { self.sendNotification(title: "Merge Failed", body: "Conflicts in \(autoBranch) \u{2014} resolve manually") } }
+            }
+        }
+    }
+
+    private func autoCleanupGoneSession(sid: String) {
+        guard autoMergeBranches else { return }
+        guard let auto = try? String(contentsOfFile: "\(home)/.claude/.auto_branch_\(sid)", encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+              let parent = try? String(contentsOfFile: "\(home)/.claude/.parent_branch_\(sid)", encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+              !auto.isEmpty, !parent.isEmpty else { return }
+        var dir = ""
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: "\(home)/.claude/.sessions.json")),
+           let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+            for entry in arr where entry["id"] as? String == sid { dir = entry["dir"] as? String ?? "" }
+        }
+        guard !dir.isEmpty else { return }
+        mergeSessionBranch(dir: dir, autoBranch: auto, parentBranch: parent, sid: sid, silent: true)
+    }
+
+    private func renameBranchIfNeeded(sid: String, name: String) {
+        guard let session = sessions.first(where: { $0.sid == sid }),
+              !session.autoBranch.isEmpty, !session.parentBranch.isEmpty else { return }
+        let slug = String(name.lowercased().replacingOccurrences(of: " ", with: "-")
+            .filter { $0.isLetter || $0.isNumber || $0 == "-" }.prefix(25))
+        guard !slug.isEmpty else { return }
+        let newBranch = "\(session.parentBranch)-\(slug)"
+        guard newBranch != session.autoBranch else { return }
+        let dir = session.dir
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            let (ok, _) = self.gitCmd(dir: dir, "branch", "-m", session.autoBranch, newBranch)
+            if ok { try? newBranch.write(toFile: "\(self.home)/.claude/.auto_branch_\(sid)", atomically: true, encoding: .utf8) }
+        }
+    }
+
     // MARK: - Actions
 
     private func compactAllWaiting() {
@@ -143,6 +219,7 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
         for s in sessions {
             let n = s.name.isEmpty ? "Session" : s.name; let cost = weekPct - s.weeklyAtStart
             l.append("\(s.state == "active" ? "\u{1F7E2}" : "\u{1F7E1}") **\(n)** \u{2014} \(s.duration) \u{2014} ctx \(s.contextPct)%\(cost > 0 ? " \u{2014} ~\(cost)% weekly" : "")")
+            if !s.autoBranch.isEmpty { l.append("   \u{21B3} Branch: \(s.autoBranch) (from \(s.parentBranch))") }
             if !s.smartContext.isEmpty { l.append("   \(s.smartContext)") }; l.append("")
         }
         l.append("Session \(sessPct)% | Weekly \(weekPct)% | Opus \(opusPct)% | Sonnet \(sonnetPct)%")
@@ -179,7 +256,7 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
     private func cleanupStaleFiles() {
         let fm = FileManager.default; let cd = "\(home)/.claude"
         guard let files = try? fm.contentsOfDirectory(atPath: cd) else { return }
-        let px = [".ctx_", ".state_", ".ctxlog_", ".tty_map_", ".tty_resolved_", ".name_tried_", ".activity_", ".files_", ".ctx_pct_"]
+        let px = [".ctx_", ".state_", ".ctxlog_", ".tty_map_", ".tty_resolved_", ".name_tried_", ".activity_", ".files_", ".ctx_pct_", ".parent_branch_", ".auto_branch_"]
         let cutoff = Date().addingTimeInterval(-86400)
         for f in files where px.contains(where: { f.hasPrefix($0) }) {
             if let a = try? fm.attributesOfItem(atPath: "\(cd)/\(f)"), let m = a[.modificationDate] as? Date, m < cutoff { try? fm.removeItem(atPath: "\(cd)/\(f)") } }
@@ -234,7 +311,12 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
                 guard !rawMsg.isEmpty else { self.pendingNames.remove(sid); return }
                 self.callHaiku(prompt: "What is the goal or theme of this coding session? Summarize in 2-5 words (e.g. 'Sleep Lab Redesign', 'Fix Auth Bug', 'Sync Pipeline Hardening'). Reply ONLY the theme. User's request: \(rawMsg)", maxTokens: 15) { result in
                     let name = result ?? String(rawMsg.split(separator: "\n").first?.prefix(35) ?? "Unknown")
-                    DispatchQueue.main.async { self.saveNameToCache(sid, name); self.pendingNames.remove(sid); self.build() }
+                    DispatchQueue.main.async {
+                        self.saveNameToCache(sid, name)
+                        self.pendingNames.remove(sid)
+                        self.renameBranchIfNeeded(sid: sid, name: name)
+                        self.build()
+                    }
                 }
             }
         }
@@ -250,10 +332,8 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
             let actions = ld.split(separator: "\n").suffix(6).joined(separator: ", ")
             var diffStat = ""
             if let dir = sessions.first(where: { $0.sid == s.sid })?.dir {
-                let pipe = Pipe(); let proc = Process(); proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-                proc.arguments = ["-C", dir, "diff", "--stat", "HEAD"]; proc.standardOutput = pipe; proc.standardError = FileHandle.nullDevice
-                try? proc.run(); proc.waitUntilExit()
-                if let last = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.split(separator: "\n").last { diffStat = ", Git: \(last)" }
+                let (_, last) = gitCmd(dir: dir, "diff", "--stat", "HEAD")
+                if let lastLine = last.split(separator: "\n").last { diffStat = ", Git: \(lastLine)" }
             }
             let sid = s.sid
             callHaiku(prompt: "What is this coding session doing RIGHT NOW? Recent actions: \(actions)\(diffStat). Reply in 5-10 words, present tense, specific. No quotes.", maxTokens: 25) { [weak self] result in
@@ -327,11 +407,21 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
         do { try proc.run() } catch { return }; proc.waitUntilExit()
         let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         readUsage(); let ai = readAgentActivity()
+
+        // Per-session agent counts from sessions.json
+        var sessionAgents: [String: Int] = [:]
+        if let d = try? Data(contentsOf: URL(fileURLWithPath: "\(home)/.claude/.sessions.json")),
+           let arr = try? JSONSerialization.jsonObject(with: d) as? [[String: Any]] {
+            for entry in arr { if let id = entry["id"] as? String, let ag = entry["agents"] as? Int { sessionAgents[id] = ag } }
+        }
+
         var result: [Session] = []
         for line in output.split(separator: "\n") where !line.isEmpty {
             let p = line.split(separator: "|", maxSplits: 10, omittingEmptySubsequences: false); guard p.count >= 5 else { continue }
             let sid = p.count > 8 ? String(p[8]) : ""; let dir = String(p[1])
             if !sid.isEmpty && sessionStartUsage[sid] == nil { sessionStartUsage[sid] = weekPct }
+            let ab = sid.isEmpty ? "" : (try? String(contentsOfFile: "\(home)/.claude/.auto_branch_\(sid)", encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let pb = sid.isEmpty ? "" : (try? String(contentsOfFile: "\(home)/.claude/.parent_branch_\(sid)", encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             result.append(Session(pid: String(p[0]).trimmingCharacters(in: .whitespaces),
                 project: (dir as NSString).lastPathComponent, branch: p.count > 2 ? String(p[2]) : "", dir: dir,
                 duration: p.count > 3 ? fmtElapsed(String(p[3])) : "", tty: String(p[4]),
@@ -340,9 +430,18 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
                 modifiedFiles: p.count > 5 ? Int(String(p[5]).trimmingCharacters(in: .whitespaces)) ?? 0 : 0,
                 state: p.count > 9 ? String(p[9]) : "",
                 contextPct: p.count > 10 ? Int(String(p[10]).trimmingCharacters(in: .whitespaces).split(separator: ".").first ?? "") ?? 0 : 0,
-                smartContext: smartCtxCache[sid] ?? "", agentCount: ai.count, agentDescs: ai.descs,
-                weeklyAtStart: sessionStartUsage[sid] ?? weekPct))
+                smartContext: smartCtxCache[sid] ?? "",
+                agentCount: sessionAgents[sid] ?? ai.count, agentDescs: ai.descs,
+                weeklyAtStart: sessionStartUsage[sid] ?? weekPct,
+                autoBranch: ab, parentBranch: pb))
         }
+
+        // Detect gone sessions for auto-cleanup
+        let currentSids = Set(result.compactMap { $0.sid.isEmpty ? nil : $0.sid })
+        let goneSids = previousSids.subtracting(currentSids)
+        for sid in goneSids { autoCleanupGoneSession(sid: sid) }
+        previousSids = currentSids
+
         sessions = result; resolveNames(); checkNotifications(); renameTerminalTabs()
     }
 
@@ -357,7 +456,7 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
     }
 
     // ================================================================
-    // MARK: - BUILD MENU — Clean, dense, useful
+    // MARK: - Build Menu
     // ================================================================
 
     private func build() {
@@ -366,7 +465,7 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
         let n = sessions.count; let wc = sessions.filter { $0.state == "waiting" }.count
         let ac = sessions.filter { $0.state == "active" }.count
 
-        // ── Menu bar ──
+        // Menu bar button
         if let b = statusItem.button {
             let s = NSMutableAttributedString()
             let dc: NSColor = ac > 0 ? active : wc > 0 ? waiting : w45
@@ -383,31 +482,34 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
             b.attributedTitle = s
         }
 
-        // ── No sessions ──
         guard !sessions.isEmpty else {
             addDisabled(a("  \u{25C7} No active sessions", sz: 12, wt: .medium, cl: w45), menu)
             menu.addItem(NSMenuItem.separator())
             usageBlock(menu); footer(menu); statusItem.menu = menu; return
         }
 
-        // ── Sessions — grouped by project ──
+        // Sessions grouped by project
         let byDir = Dictionary(grouping: sessions, by: \.dir)
         for (_, group) in byDir.sorted(by: { $0.key < $1.key }) {
             let f = group[0]
 
-            // Project header: name + branch inline
+            // Project header
             let ph = NSMutableAttributedString()
             ph.append(a("  \(f.project)", sz: 13, wt: .heavy, cl: w90))
             if !f.branch.isEmpty { ph.append(a("  \(f.branch)", sz: 9, wt: .bold, cl: teal, mono: true)) }
-            if f.modifiedFiles > 0 { ph.append(a("  \(f.modifiedFiles)\u{0394}", sz: 9, wt: .medium, cl: w30, mono: true)) }
+            let totalMod = group.reduce(0) { $0 + $1.modifiedFiles }
+            if totalMod > 0 { ph.append(a("  \(totalMod)\u{0394}", sz: 9, wt: .medium, cl: w30, mono: true)) }
             addDisabled(ph, menu)
 
-            // Conflict warning (only if multiple sessions)
+            // Conflict warning with auto-split
             if group.count > 1 {
-                let si = NSMenuItem(title: "", action: #selector(splitBranches(_:)), keyEquivalent: "")
-                si.target = self; si.attributedTitle = a("  \u{26A0} \(group.count) sessions \u{2014} split branches", sz: 10, wt: .bold, cl: amber)
-                si.representedObject = group.map { ["name": $0.name.isEmpty ? $0.tty : $0.name, "dir": $0.dir, "branch": $0.branch, "tty": $0.tty] }
-                menu.addItem(si)
+                let sameBranch = Set(group.map(\.branch)).count == 1 && !f.branch.isEmpty
+                if sameBranch {
+                    let si = NSMenuItem(title: "", action: #selector(splitBranches(_:)), keyEquivalent: "")
+                    si.target = self; si.attributedTitle = a("  \u{26A0} \(group.count) sessions \u{2014} split branches", sz: 10, wt: .bold, cl: amber)
+                    si.representedObject = group.map { ["name": $0.name.isEmpty ? $0.tty : $0.name, "dir": $0.dir, "branch": $0.branch, "tty": $0.tty, "sid": $0.sid] }
+                    menu.addItem(si)
+                }
             }
 
             // Session rows
@@ -415,73 +517,111 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
                 let dn = s.name.isEmpty ? (pendingNames.contains(s.sid) ? "Naming..." : "Session") : s.name
                 let r = NSMutableAttributedString()
 
-                // Dot + name
                 let dotC: NSColor = s.state == "active" ? active : s.state == "waiting" ? waiting : w30
                 r.append(a("  \u{25CF} ", sz: 10, wt: .bold, cl: dotC))
                 r.append(a(dn, sz: 13, wt: .bold, cl: w90))
 
-                // Inline metadata: duration, ctx%, cost — compact right side
-                var meta: [String] = []; meta.append(s.duration)
-                if s.contextPct > 0 { meta.append("ctx \(s.contextPct)%") }
+                // Inline metadata
+                var meta: [String] = [s.duration]
+                if s.contextPct > 0 { meta.append("\(s.contextPct)%") }
                 let cost = weekPct - s.weeklyAtStart; if cost > 0 { meta.append("~\(cost)%w") }
-                if s.agentCount > 0 { meta.append("+\(s.agentCount) agents") }
-                let metaStr = meta.joined(separator: " \u{00B7} ")
-                r.append(a("  ", sz: 9, wt: .regular, cl: .clear))
-
+                if s.agentCount > 0 { meta.append("+\(s.agentCount)ag") }
                 let metaC: NSColor = s.contextPct >= 80 ? coral : s.contextPct >= 60 ? amber : w45
-                r.append(a(metaStr, sz: 9, wt: .medium, cl: metaC, mono: true))
+                r.append(a("  \(meta.joined(separator: "\u{00B7}"))", sz: 9, wt: .medium, cl: metaC, mono: true))
 
-                // Smart context line
+                // Auto-branch badge
+                if !s.autoBranch.isEmpty {
+                    r.append(a("  \u{21B3}", sz: 9, wt: .bold, cl: teal))
+                }
+
+                // Smart context on second line
                 let ctx = !s.smartContext.isEmpty ? s.smartContext : !s.context.isEmpty ? s.context : s.state == "waiting" ? "Waiting for your input" : "Working..."
-                let ctxC: NSColor = !s.smartContext.isEmpty ? purple : w45
+                let ctxC: NSColor = !s.smartContext.isEmpty ? purple : s.state == "waiting" ? waiting : w45
                 r.append(NSAttributedString(string: "\n", attributes: [.font: NSFont.systemFont(ofSize: 2)]))
                 r.append(a("      \(ctx)", sz: 11, wt: .medium, cl: ctxC))
 
-                let mi = NSMenuItem(title: "", action: #selector(openTerm(_:)), keyEquivalent: "")
-                mi.target = self; mi.representedObject = s.tty; mi.attributedTitle = r; mi.isEnabled = true; menu.addItem(mi)
-
-                if s.state == "waiting" || s.state.isEmpty {
-                    let wr = NSMenuItem(title: "", action: #selector(wrapUpSession(_:)), keyEquivalent: "")
-                    wr.target = self; wr.representedObject = ["tty": s.tty, "name": dn]
-                    wr.attributedTitle = a("      \u{23FB} Send command...", sz: 9, wt: .medium, cl: w30)
-                    menu.addItem(wr)
-                }
+                let mi = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+                mi.attributedTitle = r; mi.submenu = sessionSubmenu(for: s); menu.addItem(mi)
             }
             menu.addItem(NSMenuItem.separator())
         }
 
-        // ── Usage block (compact) ──
-        usageBlock(menu)
-
-        // ── Footer ──
-        footer(menu)
-        statusItem.menu = menu
+        usageBlock(menu); footer(menu); statusItem.menu = menu
     }
 
-    // MARK: - Usage (one dense block)
+    // MARK: - Session Submenu
+
+    private func sessionSubmenu(for s: Session) -> NSMenu {
+        let sub = NSMenu(); sub.autoenablesItems = false
+        let isWaiting = s.state == "waiting" || s.state.isEmpty
+        let hasTTY = !s.tty.isEmpty
+
+        // Jump to Terminal
+        let jump = NSMenuItem(title: "Jump to Terminal", action: #selector(openTerm(_:)), keyEquivalent: "")
+        jump.target = self; jump.representedObject = s.tty; jump.isEnabled = hasTTY; sub.addItem(jump)
+        sub.addItem(NSMenuItem.separator())
+
+        // Quick commands
+        for cmd in ["/compact", "/done", "/clear"] {
+            let item = NSMenuItem(title: "Send \(cmd)", action: #selector(sendCmd(_:)), keyEquivalent: "")
+            item.target = self; item.representedObject = ["tty": s.tty, "cmd": cmd]
+            item.isEnabled = isWaiting && hasTTY; sub.addItem(item)
+        }
+        let custom = NSMenuItem(title: "Custom command\u{2026}", action: #selector(wrapUpSession(_:)), keyEquivalent: "")
+        custom.target = self; custom.representedObject = ["tty": s.tty, "name": s.name.isEmpty ? "Session" : s.name]
+        custom.isEnabled = isWaiting && hasTTY; sub.addItem(custom)
+
+        // Branch section
+        if !s.autoBranch.isEmpty {
+            sub.addItem(NSMenuItem.separator())
+            let bi = NSMenuItem(); bi.isEnabled = false
+            bi.attributedTitle = a("\u{21B3} \(s.autoBranch)", sz: 10, wt: .medium, cl: teal, mono: true); sub.addItem(bi)
+            if !s.parentBranch.isEmpty {
+                let pi = NSMenuItem(); pi.isEnabled = false
+                pi.attributedTitle = a("\u{21B3} from \(s.parentBranch)", sz: 10, wt: .medium, cl: w45, mono: true); sub.addItem(pi)
+            }
+            if s.branch != s.autoBranch {
+                let sw = NSMenuItem(title: "Switch to \(s.autoBranch)", action: #selector(switchBranch(_:)), keyEquivalent: "")
+                sw.target = self; sw.representedObject = ["tty": s.tty, "branch": s.autoBranch]
+                sw.isEnabled = isWaiting && hasTTY; sub.addItem(sw)
+            }
+            let merge = NSMenuItem(title: "Merge \u{2192} \(s.parentBranch)", action: #selector(mergeAction(_:)), keyEquivalent: "")
+            merge.target = self; merge.representedObject = ["dir": s.dir, "auto": s.autoBranch, "parent": s.parentBranch, "sid": s.sid]
+            sub.addItem(merge)
+        }
+
+        sub.addItem(NSMenuItem.separator())
+
+        // Open in Finder + Copy Path
+        let finder = NSMenuItem(title: "Open in Finder", action: #selector(openFinder(_:)), keyEquivalent: "")
+        finder.target = self; finder.representedObject = s.dir; sub.addItem(finder)
+        let cp = NSMenuItem(title: "Copy Path", action: #selector(copyPath(_:)), keyEquivalent: "")
+        cp.target = self; cp.representedObject = s.dir; sub.addItem(cp)
+
+        return sub
+    }
+
+    // MARK: - Usage Block
 
     private func usageBlock(_ menu: NSMenu) {
-        // Session + Weekly bars
         bar("Sess", sessPct, sessResetStr, menu)
         bar("Week", weekPct, weekResetStr, menu)
 
-        // Opus/Sonnet + velocity + budget — one line
         var infoItems: [String] = []
         if opusPct > 0 { infoItems.append("Opus \(opusPct)%") }
-        if sonnetPct > 0 { infoItems.append("Sonnet \(sonnetPct)%") }
+        if sonnetPct > 0 { infoItems.append("Son \(sonnetPct)%") }
         if let vel = velocityTracker.velocityPerHour(current: weekPct), vel > 0 {
             infoItems.append(String(format: "%.1f%%/hr", vel))
         }
         if let reset = weekResetDate {
             let days = max(1, reset.timeIntervalSinceNow / 86400)
             let perDay = Double(max(0, 100 - weekPct)) / days
-            infoItems.append(String(format: "%.0f%%/day budget", perDay))
+            infoItems.append(String(format: "%.0f%%/day", perDay))
         }
         if !infoItems.isEmpty {
             addDisabled(a("  \(infoItems.joined(separator: "  \u{00B7}  "))", sz: 9, wt: .medium, cl: w45, mono: true), menu)
         }
 
-        // ETA warning (only if approaching limit)
         if let eta = velocityTracker.etaMinutes(current: weekPct, target: 80), weekPct < 80 {
             let etaC: NSColor; let etaS: String
             if eta < 60 { etaC = coral; etaS = "  \u{26A0} 80% in <1h" }
@@ -492,7 +632,6 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
             addDisabled(a("  \u{26A0} Over 80% weekly limit", sz: 9, wt: .bold, cl: coral, mono: true), menu)
         }
 
-        // Today delta
         if let ss = try? String(contentsOfFile: "\(home)/.claude/.weekly_start_pct", encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines), let sp = Int(ss) {
             let d = weekPct - sp; if d > 0 { addDisabled(a("  +\(d)% today", sz: 9, wt: .medium, cl: w30, mono: true), menu) }
         }
@@ -519,6 +658,11 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
         if wc > 0 {
             let ca = NSMenuItem(title: "", action: #selector(compactAllAction), keyEquivalent: "")
             ca.target = self; ca.attributedTitle = a("  /compact all (\(wc))", sz: 11, wt: .bold, cl: waiting); menu.addItem(ca) }
+
+        if sessions.contains(where: { !$0.autoBranch.isEmpty }) {
+            let ma = NSMenuItem(title: "", action: #selector(mergeAllClean), keyEquivalent: "m")
+            ma.target = self; ma.attributedTitle = a("  Merge clean branches", sz: 11, wt: .bold, cl: teal); menu.addItem(ma) }
+
         if !sessions.isEmpty {
             let ex = NSMenuItem(title: "", action: #selector(exportAction), keyEquivalent: "e")
             ex.target = self; ex.attributedTitle = a("  Export summary", sz: 10, wt: .medium, cl: w45); menu.addItem(ex) }
@@ -531,23 +675,14 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
         tog(sm, "Notification Sounds", notifySound, #selector(toggleSound))
         tog(sm, "AI Names + Smart Context", enableHaiku, #selector(toggleHaiku))
         tog(sm, "Rename Terminal Tabs", renameTerminals, #selector(toggleRename))
+        tog(sm, "Auto-merge on Exit", autoMergeBranches, #selector(toggleAutoMerge))
         sm.addItem(NSMenuItem.separator())
         tog(sm, "Launch at Login", FileManager.default.fileExists(atPath: "\(home)/Library/LaunchAgents/com.claude.monitor.plist"), #selector(toggleAutoLaunch))
         let si = NSMenuItem(title: "Settings", action: nil, keyEquivalent: ""); si.submenu = sm; menu.addItem(si)
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
     }
 
-    // MARK: - Helpers
-
-    private func addDisabled(_ attr: NSAttributedString, _ menu: NSMenu) {
-        let i = NSMenuItem(title: "", action: nil, keyEquivalent: ""); i.attributedTitle = attr; i.isEnabled = false; menu.addItem(i) }
-    private func tog(_ menu: NSMenu, _ label: String, _ on: Bool, _ sel: Selector) {
-        let i = NSMenuItem(title: on ? "\u{2713} \(label)" : "   \(label)", action: sel, keyEquivalent: ""); i.target = self; menu.addItem(i) }
-    private func a(_ s: String, sz: CGFloat, wt: NSFont.Weight, cl: NSColor, mono: Bool = false) -> NSAttributedString {
-        NSAttributedString(string: s, attributes: [.font: mono ? NSFont.monospacedSystemFont(ofSize: sz, weight: wt) : NSFont.systemFont(ofSize: sz, weight: wt), .foregroundColor: cl]) }
-    private func fmtReset(_ s: String?) -> String? { guard let s, let d = iso(s) else { return nil }; let r = d.timeIntervalSinceNow; guard r > 0 else { return nil }; return "\(Int(r)/3600)h\((Int(r)%3600)/60)m" }
-    private func fmtDay(_ s: String?) -> String? { guard let s, let d = iso(s) else { return nil }; let f = DateFormatter(); f.dateFormat = "EEE HH:mm"; return f.string(from: d) }
-    private func iso(_ s: String) -> Date? { let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]; return f.date(from: s) ?? { f.formatOptions = [.withInternetDateTime]; return f.date(from: s) }() }
+    // MARK: - @objc Actions
 
     @objc private func compactAllAction() { compactAllWaiting() }
     @objc private func exportAction() { exportSummary() }
@@ -556,8 +691,14 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
     @objc private func toggleSound() { notifySound.toggle(); build() }
     @objc private func toggleHaiku() { enableHaiku.toggle(); build() }
     @objc private func toggleRename() { renameTerminals.toggle(); build() }
+    @objc private func toggleAutoMerge() { autoMergeBranches.toggle(); build() }
     @objc private func refresh() { scan(); build() }
     @objc private func openTerm(_ sender: NSMenuItem) { if let t = sender.representedObject as? String, !t.isEmpty { jumpToSession(t) } }
+
+    @objc private func sendCmd(_ sender: NSMenuItem) {
+        guard let info = sender.representedObject as? [String: String], let tty = info["tty"], let cmd = info["cmd"], !tty.isEmpty else { return }
+        typeInTerminal(tty: tty, text: cmd)
+    }
 
     @objc private func wrapUpSession(_ sender: NSMenuItem) {
         guard let info = sender.representedObject as? [String: String], let tty = info["tty"], !tty.isEmpty else { return }
@@ -568,18 +709,60 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
         if al.runModal() == .alertFirstButtonReturn && !f.stringValue.isEmpty { typeInTerminal(tty: tty, text: f.stringValue) }
     }
 
+    @objc private func switchBranch(_ sender: NSMenuItem) {
+        guard let info = sender.representedObject as? [String: String], let tty = info["tty"], let branch = info["branch"], !tty.isEmpty else { return }
+        typeInTerminal(tty: tty, text: "Switch to branch \(branch) to isolate your changes. Run: git checkout \(branch)")
+    }
+
+    @objc private func mergeAction(_ sender: NSMenuItem) {
+        guard let info = sender.representedObject as? [String: String],
+              let dir = info["dir"], let auto = info["auto"], let parent = info["parent"], let sid = info["sid"] else { return }
+        mergeSessionBranch(dir: dir, autoBranch: auto, parentBranch: parent, sid: sid)
+    }
+
+    @objc private func mergeAllClean() {
+        let mergeable = sessions.filter { !$0.autoBranch.isEmpty && !$0.parentBranch.isEmpty }
+        guard !mergeable.isEmpty else { sendNotification(title: "Nothing to Merge", body: "No auto-branches found"); return }
+        for s in mergeable { mergeSessionBranch(dir: s.dir, autoBranch: s.autoBranch, parentBranch: s.parentBranch, sid: s.sid) }
+    }
+
+    @objc private func openFinder(_ sender: NSMenuItem) {
+        guard let dir = sender.representedObject as? String else { return }
+        let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/open"); p.arguments = [dir]
+        p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice; try? p.run()
+    }
+
+    @objc private func copyPath(_ sender: NSMenuItem) {
+        guard let dir = sender.representedObject as? String else { return }
+        NSPasteboard.general.clearContents(); NSPasteboard.general.setString(dir, forType: .string)
+        sendNotification(title: "Copied", body: dir)
+    }
+
     @objc private func splitBranches(_ sender: NSMenuItem) {
-        guard let infos = sender.representedObject as? [[String: String]], infos.count > 1, let dir = infos.first?["dir"], let bb = infos.first?["branch"], !bb.isEmpty else { return }
-        var cmds: [String] = []; var created: [String] = []
+        guard let infos = sender.representedObject as? [[String: String]], infos.count > 1,
+              let dir = infos.first?["dir"], let bb = infos.first?["branch"], !bb.isEmpty else { return }
+        var created: [String] = []
         for (i, info) in infos.enumerated() {
-            if i == 0 { continue }
-            let slug = String((info["name"] ?? "s\(i)").lowercased().replacingOccurrences(of: " ", with: "-").filter { $0.isLetter || $0.isNumber || $0 == "-" }.prefix(30))
-            let br = "\(bb)-\(slug)"; let proc = Process(); proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-            proc.arguments = ["-C", dir, "branch", br, bb]; proc.standardOutput = FileHandle.nullDevice; proc.standardError = FileHandle.nullDevice
-            try? proc.run(); proc.waitUntilExit(); created.append(br); cmds.append("git checkout \(br)")
+            guard i > 0, let tty = info["tty"], !tty.isEmpty else { continue }
+            let sid = info["sid"] ?? ""
+            let slug = String((info["name"] ?? "s\(i)").lowercased().replacingOccurrences(of: " ", with: "-")
+                .filter { $0.isLetter || $0.isNumber || $0 == "-" }.prefix(30))
+            let br = "\(bb)-\(slug.isEmpty ? "s\(i)" : slug)"
+            let (ok, _) = gitCmd(dir: dir, "branch", br, bb)
+            guard ok else { continue }
+            if !sid.isEmpty {
+                try? bb.write(toFile: "\(home)/.claude/.parent_branch_\(sid)", atomically: true, encoding: .utf8)
+                try? br.write(toFile: "\(home)/.claude/.auto_branch_\(sid)", atomically: true, encoding: .utf8)
+            }
+            created.append(br)
+            // Tell Claude to switch if session is idle
+            let sessState = sessions.first(where: { $0.tty == tty })?.state ?? ""
+            if sessState == "waiting" || sessState.isEmpty {
+                typeInTerminal(tty: tty, text: "Switch to branch \(br) to avoid conflicts. Run: git checkout \(br)")
+            }
         }
-        NSPasteboard.general.clearContents(); NSPasteboard.general.setString(cmds.joined(separator: "\n"), forType: .string)
-        sendNotification(title: "Split", body: "\(created.count) branches created, commands copied", sound: "Glass")
+        sendNotification(title: "Branches Split", body: "\(created.count) branch\(created.count != 1 ? "es" : "") created", sound: "Glass")
+        scan(); build()
     }
 
     @objc private func toggleAutoLaunch() {
@@ -596,6 +779,18 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
             sendNotification(title: "Monitor", body: "Will launch at login", sound: "Glass")
         }; build()
     }
+
+    // MARK: - Helpers
+
+    private func addDisabled(_ attr: NSAttributedString, _ menu: NSMenu) {
+        let i = NSMenuItem(title: "", action: nil, keyEquivalent: ""); i.attributedTitle = attr; i.isEnabled = false; menu.addItem(i) }
+    private func tog(_ menu: NSMenu, _ label: String, _ on: Bool, _ sel: Selector) {
+        let i = NSMenuItem(title: on ? "\u{2713} \(label)" : "   \(label)", action: sel, keyEquivalent: ""); i.target = self; menu.addItem(i) }
+    private func a(_ s: String, sz: CGFloat, wt: NSFont.Weight, cl: NSColor, mono: Bool = false) -> NSAttributedString {
+        NSAttributedString(string: s, attributes: [.font: mono ? NSFont.monospacedSystemFont(ofSize: sz, weight: wt) : NSFont.systemFont(ofSize: sz, weight: wt), .foregroundColor: cl]) }
+    private func fmtReset(_ s: String?) -> String? { guard let s, let d = iso(s) else { return nil }; let r = d.timeIntervalSinceNow; guard r > 0 else { return nil }; return "\(Int(r)/3600)h\((Int(r)%3600)/60)m" }
+    private func fmtDay(_ s: String?) -> String? { guard let s, let d = iso(s) else { return nil }; let f = DateFormatter(); f.dateFormat = "EEE HH:mm"; return f.string(from: d) }
+    private func iso(_ s: String) -> Date? { let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]; return f.date(from: s) ?? { f.formatOptions = [.withInternetDateTime]; return f.date(from: s) }() }
 }
 
 let app = NSApplication.shared; app.setActivationPolicy(.accessory)
