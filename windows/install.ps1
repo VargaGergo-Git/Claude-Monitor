@@ -70,6 +70,16 @@ if (-not (Get-Command "jq" -ErrorAction SilentlyContinue)) {
 New-Item -ItemType Directory -Path $ClaudeDir -Force | Out-Null
 New-Item -ItemType Directory -Path $HooksDir -Force | Out-Null
 
+# Clean up old ANSI-encoded session data (Unicode fix)
+$oldSessions = Join-Path $ClaudeDir ".sessions.json"
+if (Test-Path $oldSessions) {
+    $raw = Get-Content $oldSessions -Raw -ErrorAction SilentlyContinue
+    if ($raw -and $raw -match '[^\x00-\x7F]' -and $raw -notmatch '\xC5\x91') {
+        Remove-Item $oldSessions -Force -ErrorAction SilentlyContinue
+        Write-Info "Cleaned stale session data (encoding fix)"
+    }
+}
+
 # -- Install hooks -----------------------------------------
 function Install-Hooks {
     Write-Info "Installing PowerShell hooks to $HooksDir..."
