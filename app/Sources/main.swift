@@ -668,10 +668,12 @@ class Monitor: NSObject, NSApplicationDelegate {
             if delta > 0 { infoLine += "+\(delta)% today" }
         }
 
-        // Haiku monitor overhead
-        if enableHaiku {
+        // Haiku monitor overhead — show % impact, not $ (Max plan)
+        if enableHaiku && haikuCallCount > 0 {
             let sep = infoLine.isEmpty ? "" : "  \u{00B7}  "
-            infoLine += "\(sep)Monitor: \(haikuCallCount) Haiku calls, ~\(haikuTokensUsed) tok"
+            let pctImpact = Double(haikuCallCount) * 0.01
+            let impactStr = pctImpact < 0.1 ? "<0.1%" : String(format: "~%.1f%%", pctImpact)
+            infoLine += "\(sep)Monitor: \(haikuCallCount) Haiku calls (\(impactStr) session impact)"
         }
 
         if !infoLine.isEmpty {

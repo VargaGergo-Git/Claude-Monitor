@@ -882,12 +882,17 @@ class ClaudeMonitor : ApplicationContext {
         } catch {}
     }
 
-    // == HAIKU COST ================================================
+    // == HAIKU USAGE IMPACT ========================================
 
-    string EstimateHaikuCost() {
+    // On Max plan, Haiku calls consume rate limit %. Estimate impact.
+    // Haiku ~100 tokens/call. A 5-hour session limit is ~millions of tokens.
+    // Impact is negligible but we show it for transparency.
+    string EstimateHaikuImpact() {
         if (haikuTokensUsed <= 0) return "";
-        double cost = haikuTokensUsed * 0.7 * 0.0000008 + haikuTokensUsed * 0.3 * 0.000004;
-        return cost < 0.001 ? "<$0.001" : "~$" + cost.ToString("F3");
+        // Rough estimate: each Haiku call is ~0.01% of a 5h session window
+        double pctImpact = haikuCallCount * 0.01;
+        if (pctImpact < 0.1) return "<0.1% session impact";
+        return "~" + pctImpact.ToString("F1") + "% session impact";
     }
 
     // =============================================================
@@ -993,7 +998,7 @@ class ClaudeMonitor : ApplicationContext {
                 }
 
                 string capturedDir = dirKey;
-                ToolStripItem of = menu.Items.Add("    \u{1F4C1}  Open in Explorer");
+                ToolStripItem of = menu.Items.Add("    \u25A1  Open in Explorer");
                 of.Font = new Font("Segoe UI", 8.5f); of.ForeColor = Color.FromArgb(80, 170, 190);
                 of.Click += new EventHandler(delegate(object sender, EventArgs e) {
                     try { Process.Start("explorer.exe", capturedDir); } catch {}
@@ -1012,8 +1017,8 @@ class ClaudeMonitor : ApplicationContext {
         // Haiku usage
         if (haikuCallCount > 0) {
             string hl = "  Haiku: " + haikuCallCount + " call" + (haikuCallCount != 1 ? "s" : "") + ", " + haikuTokensUsed + " tok";
-            string cost = EstimateHaikuCost();
-            if (!string.IsNullOrEmpty(cost)) hl += " (" + cost + ")";
+            string impact = EstimateHaikuImpact();
+            if (!string.IsNullOrEmpty(impact)) hl += " (" + impact + ")";
             if (haikuTokensToday > 0) hl += "  |  Today: " + haikuTokensToday + "/" + prefs.haikuDailyBudget;
             AddLabel(menu, hl, Color.FromArgb(120, 130, 170));
             menu.Items.Add(new ToolStripSeparator());
@@ -1413,7 +1418,7 @@ class ClaudeMonitor : ApplicationContext {
             DrawActionBtn(g, "\u21BB Refresh", refreshRect, hoverAction == 0, Color.FromArgb(120, 140, 200));
             bool hw = false; for (int i = 0; i < sessions.Count; i++) if (sessions[i].State == "waiting") { hw = true; break; }
             DrawActionBtn(g, "/compact", compactCopyRect, hoverAction == 1, hw ? Color.FromArgb(230, 180, 50) : Color.FromArgb(45, 48, 60));
-            DrawActionBtn(g, "\u{1F4C1} Open", openFolderRect, hoverAction == 2, Color.FromArgb(80, 170, 160));
+            DrawActionBtn(g, "\u25A1 Open", openFolderRect, hoverAction == 2, Color.FromArgb(80, 170, 160));
         }
 
         void DrawUsageBar(Graphics g, string label, int pct, string reset, string delta, float x, float y) {
