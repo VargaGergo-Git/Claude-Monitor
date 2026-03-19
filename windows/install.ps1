@@ -300,7 +300,7 @@ function Install-App {
     $compileExit = $LASTEXITCODE
     $ErrorActionPreference = $prevEAP
 
-    Remove-Item $tmpCs -Force -ErrorAction SilentlyContinue
+    try { [System.IO.File]::Delete($tmpCs) } catch {}
 
     if ($compileExit -ne 0) {
         Write-Err "Compilation failed:"
