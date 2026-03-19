@@ -26,6 +26,10 @@ class ClaudeMonitor : ApplicationContext {
     bool notifyWaiting = true;
     bool notifyContext = true;
 
+    // Floating overlay
+    bool showOverlay;
+    OverlayForm overlay;
+
     // Haiku AI naming
     Dictionary<string, string> sessionNames;
     string sessionNamesPath;
@@ -87,6 +91,12 @@ class ClaudeMonitor : ApplicationContext {
 
         // Run cleanup once on startup
         CleanupStaleFiles();
+
+        // Create overlay form on UI thread (starts hidden)
+        overlay = new OverlayForm();
+        overlay.OverlayClicked += new EventHandler(delegate(object sender2, EventArgs e2) {
+            ShowMenu();
+        });
 
         DoRefresh();
     }
@@ -285,7 +295,7 @@ class ClaudeMonitor : ApplicationContext {
                     string line;
                     while ((line = reader.ReadLine()) != null) {
                         if (string.IsNullOrEmpty(line)) continue;
-                        if (line.IndexOf("\"type\":\"user\"") < 0) continue;
+                        if (line.IndexOf("\"type\"") < 0 || line.IndexOf("\"user\"") < 0) continue;
 
                         try {
                             Dictionary<string, object> entry = json.Deserialize<Dictionary<string, object>>(line);
@@ -828,6 +838,17 @@ class ClaudeMonitor : ApplicationContext {
         ReadUsage();
         CheckNotifications(sessions);
         UpdateIcon(sessions);
+
+        // Update floating overlay
+        if (overlay != null && showOverlay) {
+            string weeklyDelta = ReadWeeklyDelta();
+            overlay.UpdateOverlay(sessions, sessPct, weekPct, sessReset, weekReset, weeklyDelta);
+            if (!overlay.Visible) {
+                overlay.Show();
+            }
+        } else if (overlay != null && !showOverlay && overlay.Visible) {
+            overlay.Hide();
+        }
     }
 
     void UpdateIcon(List<Session> sessions) {
@@ -1085,6 +1106,23 @@ class ClaudeMonitor : ApplicationContext {
         });
         settings.DropDownItems.Add(launchLogin);
 
+        ToolStripMenuItem overlayToggle = new ToolStripMenuItem("Show Overlay");
+        overlayToggle.Checked = showOverlay;
+        overlayToggle.ForeColor = Color.White;
+        overlayToggle.Click += new EventHandler(delegate(object sender, EventArgs e) {
+            showOverlay = !showOverlay;
+            overlayToggle.Checked = showOverlay;
+            if (showOverlay && overlay != null) {
+                string wd = ReadWeeklyDelta();
+                List<Session> ovSessions = ScanSessions();
+                overlay.UpdateOverlay(ovSessions, sessPct, weekPct, sessReset, weekReset, wd);
+                overlay.Show();
+            } else if (!showOverlay && overlay != null) {
+                overlay.Hide();
+            }
+        });
+        settings.DropDownItems.Add(overlayToggle);
+
         menu.Items.Add(settings);
 
         ToolStripItem quit = menu.Items.Add("\u2715  Quit");
@@ -1092,6 +1130,10 @@ class ClaudeMonitor : ApplicationContext {
         quit.Font = new Font("Segoe UI", 9f);
         quit.Click += new EventHandler(delegate(object sender, EventArgs e) {
             tray.Visible = false;
+            if (overlay != null) {
+                overlay.Close();
+                overlay.Dispose();
+            }
             Application.Exit();
         });
 
@@ -1183,6 +1225,237 @@ class ClaudeMonitor : ApplicationContext {
         }
         public override Color SeparatorLight {
             get { return Color.FromArgb(40, 40, 55); }
+        }
+    }
+
+    // ── Floating Overlay Widget ─────────────────────────
+    class OverlayForm : Form {
+        // Drag state
+        bool dragging;
+        Point dragOffset;
+
+        // Close button hover
+        bool closeHover;
+        Rectangle closeRect;
+
+        // Display data
+        int sessionCount;
+        int activeCount;
+        int waitingCount;
+        string line2 = "";
+        string line3 = "";
+        Color line2Color;
+        Color line3Color;
+        bool hasSessions;
+
+        // Click event to open tray menu
+        public event EventHandler OverlayClicked;
+
+        public OverlayForm() {
+            this.FormBorderStyle = FormBorderStyle.None;
+            this.TopMost = true;
+            this.ShowInTaskbar = false;
+            this.StartPosition = FormStartPosition.Manual;
+            this.BackColor = Color.FromArgb(220, 20, 20, 32);
+            this.Size = new Size(300, 100);
+            this.closeRect = new Rectangle(275, 5, 18, 18);
+
+            // Position top-right of primary screen with 20px margin
+            Rectangle screen = Screen.PrimaryScreen.WorkingArea;
+            this.Location = new Point(screen.Right - this.Width - 20, screen.Top + 20);
+
+            // Double buffering for smooth rendering
+            this.SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
+
+            // Rounded corners via Region
+            GraphicsPath path = new GraphicsPath();
+            path.AddArc(0, 0, 24, 24, 180, 90);
+            path.AddArc(this.Width - 24, 0, 24, 24, 270, 90);
+            path.AddArc(this.Width - 24, this.Height - 24, 24, 24, 0, 90);
+            path.AddArc(0, this.Height - 24, 24, 24, 90, 90);
+            path.CloseFigure();
+            this.Region = new Region(path);
+
+            // Init colors
+            line2Color = Color.FromArgb(80, 180, 110);
+            line3Color = Color.FromArgb(80, 180, 110);
+        }
+
+        public void UpdateOverlay(List<Session> sessions, int sessPct, int weekPct, string sessReset, string weekReset, string weeklyDelta) {
+            if (sessions == null) sessions = new List<Session>();
+            sessionCount = sessions.Count;
+            activeCount = 0;
+            waitingCount = 0;
+            hasSessions = sessions.Count > 0;
+
+            for (int i = 0; i < sessions.Count; i++) {
+                if (sessions[i].State == "active") activeCount++;
+                if (sessions[i].State == "waiting") waitingCount++;
+            }
+
+            // Build line 2: session usage bar
+            if (sessPct > 0) {
+                int filled2 = Math.Min(sessPct * 8 / 100, 8);
+                string bar2 = new string('\u2588', filled2) + new string('\u2591', 8 - filled2);
+                line2 = "Session " + bar2 + " " + sessPct + "%";
+                if (!string.IsNullOrEmpty(sessReset)) {
+                    line2 = line2 + "  \u21BB " + sessReset;
+                }
+                if (sessPct >= 80) {
+                    line2Color = Color.FromArgb(210, 70, 60);
+                } else if (sessPct >= 50) {
+                    line2Color = Color.FromArgb(200, 160, 40);
+                } else {
+                    line2Color = Color.FromArgb(80, 180, 110);
+                }
+            } else {
+                line2 = "";
+            }
+
+            // Build line 3: weekly usage bar
+            if (weekPct > 0) {
+                int filled3 = Math.Min(weekPct * 8 / 100, 8);
+                string bar3 = new string('\u2588', filled3) + new string('\u2591', 8 - filled3);
+                line3 = "Weekly  " + bar3 + " " + weekPct + "%";
+                if (!string.IsNullOrEmpty(weeklyDelta)) {
+                    line3 = line3 + "  \u0394 " + weeklyDelta;
+                } else if (!string.IsNullOrEmpty(weekReset)) {
+                    line3 = line3 + "  \u21BB " + weekReset;
+                }
+                if (weekPct >= 80) {
+                    line3Color = Color.FromArgb(210, 70, 60);
+                } else if (weekPct >= 50) {
+                    line3Color = Color.FromArgb(200, 160, 40);
+                } else {
+                    line3Color = Color.FromArgb(80, 180, 110);
+                }
+            } else {
+                line3 = "";
+            }
+
+            this.Invalidate();
+        }
+
+        protected override void OnPaint(PaintEventArgs e) {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+
+            // Subtle border
+            using (Pen borderPen = new Pen(Color.FromArgb(50, 60, 80), 1f)) {
+                g.DrawRectangle(borderPen, 0, 0, this.Width - 1, this.Height - 1);
+            }
+
+            // Close button (X)
+            Color closeFg = closeHover ? Color.FromArgb(210, 70, 60) : Color.FromArgb(100, 105, 125);
+            using (Font closeFont = new Font("Segoe UI", 9f, FontStyle.Bold)) {
+                using (SolidBrush closeBrush = new SolidBrush(closeFg)) {
+                    g.DrawString("\u00D7", closeFont, closeBrush, closeRect.X, closeRect.Y);
+                }
+            }
+
+            if (!hasSessions) {
+                // No sessions: muted placeholder
+                using (Font mutedFont = new Font("Segoe UI", 10f)) {
+                    using (SolidBrush mutedBrush = new SolidBrush(Color.FromArgb(100, 105, 125))) {
+                        g.DrawString("\u25C7  Claude Monitor", mutedFont, mutedBrush, 14, 38);
+                    }
+                }
+                return;
+            }
+
+            // Line 1: diamond + session count + state dots
+            float y1 = 12;
+            using (Font boldFont = new Font("Segoe UI", 10f, FontStyle.Bold)) {
+                using (SolidBrush whiteBrush = new SolidBrush(Color.White)) {
+                    string countText = "\u25C6 " + sessionCount + " session" + (sessionCount != 1 ? "s" : "");
+                    g.DrawString(countText, boldFont, whiteBrush, 14, y1);
+
+                    // Measure text width for positioning dots
+                    SizeF countSize = g.MeasureString(countText, boldFont);
+                    float dotX = 14 + countSize.Width + 6;
+
+                    // Draw state dots
+                    for (int i = 0; i < activeCount; i++) {
+                        using (SolidBrush greenDot = new SolidBrush(Color.FromArgb(100, 220, 140))) {
+                            g.FillEllipse(greenDot, dotX + (i * 14), y1 + 5, 8, 8);
+                        }
+                    }
+                    float amberX = dotX + (activeCount * 14);
+                    for (int i = 0; i < waitingCount; i++) {
+                        using (SolidBrush amberDot = new SolidBrush(Color.FromArgb(240, 190, 60))) {
+                            g.FillEllipse(amberDot, amberX + (i * 14), y1 + 5, 8, 8);
+                        }
+                    }
+                }
+            }
+
+            // Line 2: session usage
+            if (!string.IsNullOrEmpty(line2)) {
+                using (Font monoFont = new Font("Consolas", 9f)) {
+                    using (SolidBrush brush2 = new SolidBrush(line2Color)) {
+                        g.DrawString(line2, monoFont, brush2, 14, 38);
+                    }
+                }
+            }
+
+            // Line 3: weekly usage
+            if (!string.IsNullOrEmpty(line3)) {
+                using (Font monoFont = new Font("Consolas", 9f)) {
+                    using (SolidBrush brush3 = new SolidBrush(line3Color)) {
+                        g.DrawString(line3, monoFont, brush3, 14, 58);
+                    }
+                }
+            }
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e) {
+            if (e.Button == MouseButtons.Left) {
+                // Check close button
+                if (closeRect.Contains(e.Location)) {
+                    this.Hide();
+                    return;
+                }
+                // Start drag
+                dragging = true;
+                dragOffset = e.Location;
+            }
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e) {
+            // Close button hover tracking
+            bool wasHover = closeHover;
+            closeHover = closeRect.Contains(e.Location);
+            if (wasHover != closeHover) {
+                this.Invalidate(closeRect);
+            }
+
+            if (dragging) {
+                Point current = this.PointToScreen(e.Location);
+                this.Location = new Point(current.X - dragOffset.X, current.Y - dragOffset.Y);
+            }
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e) {
+            if (e.Button == MouseButtons.Left) {
+                if (dragging) {
+                    dragging = false;
+                } else {
+                    // Click (not drag) opens the tray menu
+                    if (OverlayClicked != null) {
+                        OverlayClicked(this, EventArgs.Empty);
+                    }
+                }
+            }
+        }
+
+        protected override CreateParams CreateParams {
+            get {
+                CreateParams cp = base.CreateParams;
+                // WS_EX_TOOLWINDOW: hide from Alt-Tab
+                cp.ExStyle = cp.ExStyle | 0x00000080;
+                return cp;
+            }
         }
     }
 }
