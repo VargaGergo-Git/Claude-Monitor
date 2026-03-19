@@ -18,39 +18,46 @@ irm https://raw.githubusercontent.com/VargaGergo-Git/Claude-Monitor/main/setup.p
 
 ## What You Get
 
-### Menu Bar App
+### Menu Bar / System Tray App
+
+Works on both **macOS** (native Swift menu bar app) and **Windows** (PowerShell system tray).
+
 - **Live session list** — see all active Claude Code sessions with project, branch, duration
 - **State indicators** — green dot (working), amber dot (waiting for input), grey (idle)
 - **AI-powered session names** — Haiku auto-names sessions based on what you asked ("Sleep Lab Redesign", "Fix Auth Bug")
 - **Smart context summaries** — Haiku periodically summarizes what each session is doing right now
 - **Context window tracking** — see how full each session's context is, get warned at 80%
 - **API usage bars** — session (5-hour) and weekly utilization with reset timers
-- **Branch conflict warnings** — alerts when multiple sessions share a branch, one-click split
-- **macOS notifications** — when Claude finishes and needs your input
-- **Click to jump** — click any session to switch to its Terminal tab
+- **Desktop notifications** — when Claude finishes and needs your input (macOS: osascript, Windows: toast)
 - **Send commands** — type and send any message or command to a waiting session from the menu
-- **Terminal tab renaming** — tabs auto-rename to match the AI-generated session name
-- **Launch at login** — toggle from the Settings menu
+- **Launch at login** — toggle from Settings (macOS: LaunchAgent, Windows: Startup folder)
+- **Branch conflict warnings** — alerts when multiple sessions share a branch, one-click split (macOS)
+- **Click to jump** — click any session to switch to its Terminal tab (macOS)
+- **Terminal tab renaming** — tabs auto-rename to the AI-generated session name (macOS)
 
 ### 11 Hooks
-Human-readable narration and session intelligence, all via Claude Code's hook system:
+
+Human-readable narration and session intelligence, all via Claude Code's hook system. Available as **bash** (`.sh`) for macOS/Linux and **PowerShell** (`.ps1`) for Windows.
 
 | Hook | Event | What it does |
 |------|-------|-------------|
-| `insights.sh` | PreToolUse | Translates every tool call into plain English ("Investigating the sleep scoring engine") |
-| `session-start.sh` | SessionStart | Maps sessions to Terminal tabs, tracks in JSON, shows git status |
-| `stop.sh` | Stop | Marks session as "waiting", auto-saves dirty state to handoff.md |
-| `notify.sh` | Notification | Context-aware macOS notifications with different sounds per type |
-| `post-commit.sh` | PostToolUse | Celebrates commits with a notification showing what was shipped |
-| `agent-start.sh` | SubagentStart | Tracks active sub-agents with descriptions |
-| `agent-stop.sh` | SubagentStop | Decrements agent count, cleans activity log |
-| `track-reads.sh` | PostToolUse | Logs which files Claude has read this session |
-| `read-before-edit.sh` | PreToolUse | Warns if Claude tries to edit a file it hasn't read yet |
-| `pre-compact.sh` | PreCompact | Reminds Claude to preserve key context before compression |
-| `learn-from-failure.sh` | PostToolUseFailure | Logs build failures, nudges after 3+ consecutive errors |
+| `insights` | PreToolUse | Translates every tool call into plain English ("Investigating the auth module") |
+| `session-start` | SessionStart | Maps sessions to terminal tabs, tracks in JSON, shows git status |
+| `stop` | Stop | Marks session as "waiting", auto-saves dirty state to handoff.md |
+| `notify` | Notification | Context-aware desktop notifications with different sounds per type |
+| `post-commit` | PostToolUse | Celebrates commits with a notification showing what was shipped |
+| `agent-start` | SubagentStart | Tracks active sub-agents with descriptions |
+| `agent-stop` | SubagentStop | Decrements agent count, cleans activity log |
+| `track-reads` | PostToolUse | Logs which files Claude has read this session |
+| `read-before-edit` | PreToolUse | Warns if Claude tries to edit a file it hasn't read yet |
+| `pre-compact` | PreCompact | Reminds Claude to preserve key context before compression |
+| `learn-from-failure` | PostToolUseFailure | Logs build failures, nudges after 3+ consecutive errors |
 
 ### Status Line
-A rich two-line status bar showing project, model, git branch, context usage, session/weekly API utilization, effort level, fast mode, and active agents — all color-coded with progress bars.
+
+A rich multi-line status bar inside your Claude Code terminal. Available for both **macOS** (bash) and **Windows** (PowerShell).
+
+Shows: project name, model, git branch + dirty indicator, context usage bar, session/weekly API utilization bars with reset timers, effort level, fast mode toggle, and active agent count — all color-coded with ANSI progress bars.
 
 ## Requirements
 
@@ -197,6 +204,7 @@ The status line fetches your Claude API usage every 5 minutes via the OAuth API 
 ```
 %USERPROFILE%\.claude\
 ├── tray-app.ps1              # System tray app (PowerShell)
+├── statusline.ps1            # Status line script (PowerShell)
 ├── ClaudeMonitor.bat         # Launcher script
 ├── hooks\
 │   ├── insights.ps1          # PreToolUse — human-friendly narration
