@@ -1,0 +1,5 @@
+# Build artifacts
+app/ClaudeMonitor
+*.o
+*.dSYM/
+.DS_Store
