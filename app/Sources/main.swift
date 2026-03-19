@@ -8,8 +8,9 @@ struct Session {
     var contextPct: Int
     var smartContext: String
     var agentCount: Int
-    var agentDescs: [String]     // what each agent is doing
-    var editedFiles: [String]    // files this session has touched
+    var agentDescs: [String]
+    var editedFiles: [String]
+    var weeklyAtStart: Int      // weekly % when this session first appeared
 }
 
 // MARK: - Velocity Tracker
@@ -25,40 +26,32 @@ class VelocityTracker {
 
     func record(pct: Int) {
         let now = Date().timeIntervalSince1970
-        // Don't record if same value within 60 seconds
         if let last = readings.last, last.pct == pct && (now - last.ts) < 60 { return }
         readings.append((now, pct))
-        // Keep last 100 readings (plenty for velocity calculation)
-        if readings.count > 100 { readings = Array(readings.suffix(100)) }
+        if readings.count > 200 { readings = Array(readings.suffix(200)) }
         save()
     }
 
-    /// Returns estimated minutes until target % is reached, or nil if pace is too slow/declining
     func etaMinutes(current: Int, target: Int) -> Int? {
         guard current < target else { return nil }
         let now = Date().timeIntervalSince1970
-        // Use readings from the last 2 hours
         let recent = readings.filter { now - $0.ts < 7200 && now - $0.ts > 60 }
         guard recent.count >= 2 else { return nil }
         let oldest = recent.first!
         let elapsed = now - oldest.ts
         let gained = current - oldest.pct
         guard gained > 0, elapsed > 0 else { return nil }
-        let pctPerSec = Double(gained) / elapsed
-        let remaining = Double(target - current) / pctPerSec
-        return Int(remaining / 60)
+        return Int(Double(target - current) / (Double(gained) / elapsed) / 60)
     }
 
-    /// Returns % gained per hour
     func velocityPerHour(current: Int) -> Double? {
         let now = Date().timeIntervalSince1970
         let recent = readings.filter { now - $0.ts < 3600 && now - $0.ts > 60 }
         guard recent.count >= 2 else { return nil }
         let oldest = recent.first!
         let elapsed = now - oldest.ts
-        let gained = current - oldest.pct
         guard elapsed > 120 else { return nil }
-        return Double(gained) / (elapsed / 3600.0)
+        return Double(current - oldest.pct) / (elapsed / 3600.0)
     }
 
     private func load() {
@@ -90,22 +83,33 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
     private var pendingCtx = Set<String>()
     private var prevStates: [String: String] = [:]
     private var ctxWarned = Set<String>()
+    private var sessionStartUsage: [String: Int] = [:]  // sid -> weekly% when first seen
 
     private var velocityTracker: VelocityTracker!
+
+    // Usage state
+    private var sessPct = 0, weekPct = 0, opusPct = 0, sonnetPct = 0
+    private var sessResetStr = "", weekResetStr = ""
+    private var weekResetDate: Date?
 
     private let ud = UserDefaults.standard
     private var notifyWaiting: Bool { get { ud.object(forKey: "notifyWaiting") as? Bool ?? true } set { ud.set(newValue, forKey: "notifyWaiting") } }
     private var notifyContext: Bool { get { ud.object(forKey: "notifyContext") as? Bool ?? true } set { ud.set(newValue, forKey: "notifyContext") } }
     private var notifySound: Bool { get { ud.object(forKey: "notifySound") as? Bool ?? true } set { ud.set(newValue, forKey: "notifySound") } }
     private var enableHaiku: Bool { get { ud.object(forKey: "enableHaiku") as? Bool ?? true } set { ud.set(newValue, forKey: "enableHaiku") } }
+    private var renameTerminals: Bool { get { ud.object(forKey: "renameTerminals") as? Bool ?? true } set { ud.set(newValue, forKey: "renameTerminals") } }
 
-    let teal = NSColor(red: 0.0, green: 0.55, blue: 0.48, alpha: 1.0)
-    let amber = NSColor(red: 0.75, green: 0.50, blue: 0.0, alpha: 1.0)
-    let green = NSColor(red: 0.22, green: 0.72, blue: 0.42, alpha: 1.0)
-    let coral = NSColor(red: 0.82, green: 0.22, blue: 0.18, alpha: 1.0)
-    let activeGreen = NSColor(red: 0.3, green: 0.85, blue: 0.45, alpha: 1.0)
-    let waitingAmber = NSColor(red: 0.95, green: 0.75, blue: 0.2, alpha: 1.0)
-    let ctxWarn = NSColor(red: 0.95, green: 0.55, blue: 0.2, alpha: 1.0)
+    // Colors
+    let teal = NSColor(red: 0.31, green: 0.78, blue: 0.72, alpha: 1)
+    let amber = NSColor(red: 0.92, green: 0.68, blue: 0.18, alpha: 1)
+    let green = NSColor(red: 0.35, green: 0.82, blue: 0.52, alpha: 1)
+    let coral = NSColor(red: 0.92, green: 0.32, blue: 0.28, alpha: 1)
+    let activeGreen = NSColor(red: 0.35, green: 0.88, blue: 0.52, alpha: 1)
+    let waitingAmber = NSColor(red: 0.95, green: 0.75, blue: 0.2, alpha: 1)
+    let ctxWarn = NSColor(red: 0.95, green: 0.55, blue: 0.2, alpha: 1)
+    let dim = NSColor(white: 0.42, alpha: 1)
+    let dimmer = NSColor(white: 0.30, alpha: 1)
+    let sectionLabel = NSColor(red: 0.45, green: 0.55, blue: 0.75, alpha: 1)
 
     private var haikuCallCount: Int { get { ud.integer(forKey: "haikuCalls") } set { ud.set(newValue, forKey: "haikuCalls") } }
     private var haikuTokensUsed: Int { get { ud.integer(forKey: "haikuTokens") } set { ud.set(newValue, forKey: "haikuTokens") } }
@@ -117,8 +121,6 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
         cleanupStaleFiles()
         loadNameCache()
         velocityTracker = VelocityTracker(home: home)
-
-        // Notification click handler — jump to session terminal
         NSUserNotificationCenter.default.delegate = self
 
         scan(); build()
@@ -130,25 +132,41 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
         }
     }
 
+    // MARK: - Terminal Tab Renaming
+
+    private func renameTerminalTabs() {
+        guard renameTerminals else { return }
+        var renames: [(tty: String, title: String)] = []
+        for s in sessions where !s.name.isEmpty && !s.tty.isEmpty {
+            renames.append((s.tty, s.name.replacingOccurrences(of: "\"", with: "'")))
+        }
+        guard !renames.isEmpty else { return }
+        var checks = ""
+        for r in renames {
+            checks += "if ttyPath is \"/dev/\(r.tty)\" then\n"
+            checks += "set custom title of t to \"\(r.title)\"\n"
+            checks += "set title displays custom title of t to true\n"
+            checks += "set title displays shell path of t to false\n"
+            checks += "set title displays window size of t to false\n"
+            checks += "set title displays device name of t to false\n"
+            checks += "set title displays file name of t to false\n"
+            checks += "set title displays settings name of t to false\n"
+            checks += "end if\n"
+        }
+        DispatchQueue.global(qos: .utility).async {
+            let script = "tell application \"Terminal\"\nrepeat with w in windows\nrepeat with t in tabs of w\nset ttyPath to tty of t\n\(checks)end repeat\nend repeat\nend tell"
+            let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            p.arguments = ["-e", script]; p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
+            try? p.run(); p.waitUntilExit()
+        }
+    }
+
     // MARK: - Actions
 
-    private func jumpToSession(_ session: Session) {
-        guard !session.tty.isEmpty else { return }
+    private func jumpToSession(_ tty: String) {
+        guard !tty.isEmpty else { return }
         let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        p.arguments = ["-e", """
-        tell application "Terminal"
-            activate
-            repeat with w in windows
-                repeat with t in tabs of w
-                    if tty of t is "/dev/\(session.tty)" then
-                        set selected tab of w to t
-                        set index of w to 1
-                        return
-                    end if
-                end repeat
-            end repeat
-        end tell
-        """]
+        p.arguments = ["-e", "tell application \"Terminal\"\nactivate\nrepeat with w in windows\nrepeat with t in tabs of w\nif tty of t is \"/dev/\(tty)\" then\nset selected tab of w to t\nset index of w to 1\nreturn\nend if\nend repeat\nend repeat\nend tell"]
         p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
         try? p.run()
     }
@@ -157,59 +175,65 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
         let waiting = sessions.filter { $0.state == "waiting" && !$0.tty.isEmpty }
         guard !waiting.isEmpty else { return }
         for s in waiting { typeInTerminal(tty: s.tty, text: "/compact") }
-        sendNotification(title: "Claude Monitor", body: "Sent /compact to \(waiting.count) session\(waiting.count != 1 ? "s" : "")", sound: "Tink")
+        sendNotification(title: "Claude Monitor", body: "Sent /compact to \(waiting.count) session\(waiting.count != 1 ? "s" : "")")
     }
 
     private func exportSummary() {
-        var lines: [String] = ["## Claude Session Summary \u{2014} \(DateFormatter.localizedString(from: Date(), dateStyle: .medium, timeStyle: .short))\n"]
+        var lines: [String] = ["## Claude Sessions \u{2014} \(DateFormatter.localizedString(from: Date(), dateStyle: .medium, timeStyle: .short))\n"]
         for s in sessions {
             let name = s.name.isEmpty ? "Session" : s.name
-            let state = s.state == "active" ? "\u{1F7E2}" : s.state == "waiting" ? "\u{1F7E1}" : "\u{26AA}"
-            lines.append("\(state) **\(name)** (\(s.project)/\(s.branch))")
+            let icon = s.state == "active" ? "\u{1F7E2}" : s.state == "waiting" ? "\u{1F7E1}" : "\u{26AA}"
+            lines.append("\(icon) **\(name)** (\(s.project)/\(s.branch))")
             lines.append("   Duration: \(s.duration) | Context: \(s.contextPct)%")
+            let cost = s.weeklyAtStart > 0 ? weekPct - s.weeklyAtStart : 0
+            if cost > 0 { lines.append("   Usage this session: ~\(cost)% weekly") }
             if !s.smartContext.isEmpty { lines.append("   Doing: \(s.smartContext)") }
-            if s.agentCount > 0 { lines.append("   Agents: \(s.agentCount) running") }
             lines.append("")
         }
-        if sessPct > 0 { lines.append("Session usage: \(sessPct)% | Weekly: \(weekPct)%") }
-        let text = lines.joined(separator: "\n")
+        lines.append("Session: \(sessPct)% | Weekly: \(weekPct)% (Opus \(opusPct)%, Sonnet \(sonnetPct)%)")
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
-        sendNotification(title: "Claude Monitor", body: "Session summary copied to clipboard", sound: "Tink")
+        NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string)
+        sendNotification(title: "Claude Monitor", body: "Summary copied to clipboard")
     }
 
-    // MARK: - File Conflict Detection
+    // MARK: - Usage Reading
 
-    private func detectConflicts() -> [String] {
-        guard sessions.count > 1 else { return [] }
-        var fileMap: [String: [String]] = [:] // file -> [session names]
-        for s in sessions where !s.dir.isEmpty {
-            let pipe = Pipe(); let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-            proc.arguments = ["-C", s.dir, "diff", "--name-only", "HEAD"]
-            proc.standardOutput = pipe; proc.standardError = FileHandle.nullDevice
-            try? proc.run(); proc.waitUntilExit()
-            let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            let name = s.name.isEmpty ? s.project : s.name
-            for file in out.split(separator: "\n") where !file.isEmpty {
-                let f = String(file)
-                fileMap[f, default: []].append(name)
-            }
+    private func readUsage() {
+        guard let data = FileManager.default.contents(atPath: "\(home)/.claude/.usage_cache.json"),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+
+        if let fh = json["five_hour"] as? [String: Any] {
+            sessPct = Int(fh["utilization"] as? Double ?? 0)
+            sessResetStr = fmtReset(fh["resets_at"] as? String) ?? ""
         }
-        return fileMap.filter { $0.value.count > 1 }.map { "\($0.key.split(separator: "/").last ?? Substring($0.key)) (\($0.value.joined(separator: " & ")))" }
+        if let sd = json["seven_day"] as? [String: Any] {
+            weekPct = Int(sd["utilization"] as? Double ?? 0)
+            weekResetStr = fmtDay(sd["resets_at"] as? String) ?? ""
+            if let ra = sd["resets_at"] as? String { weekResetDate = iso(ra) }
+        }
+        opusPct = Int((json["seven_day_opus"] as? [String: Any])?["utilization"] as? Double ?? 0)
+        sonnetPct = Int((json["seven_day_sonnet"] as? [String: Any])?["utilization"] as? Double ?? 0)
+
+        velocityTracker.record(pct: weekPct)
+    }
+
+    /// Budget advisor: how much % per day is safe
+    private func dailyBudget() -> String? {
+        guard let reset = weekResetDate else { return nil }
+        let daysLeft = max(1, reset.timeIntervalSinceNow / 86400)
+        let remaining = Double(max(0, 100 - weekPct))
+        let perDay = remaining / daysLeft
+        return String(format: "%.0f%%/day for %.0f days", perDay, daysLeft)
     }
 
     // MARK: - Agent Activity
 
     private func readAgentActivity() -> (count: Int, descs: [String]) {
-        let countPath = "\(home)/.claude/.active_agents"
-        let actPath = "\(home)/.claude/.agent_activity"
         var count = 0
-        if let str = try? String(contentsOfFile: countPath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+        if let str = try? String(contentsOfFile: "\(home)/.claude/.active_agents", encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
            let c = Int(str) { count = max(0, c) }
-
         var descs: [String] = []
-        if let data = try? String(contentsOfFile: actPath, encoding: .utf8) {
+        if let data = try? String(contentsOfFile: "\(home)/.claude/.agent_activity", encoding: .utf8) {
             let now = Date().timeIntervalSince1970
             for line in data.split(separator: "\n").suffix(10) {
                 let parts = line.split(separator: "|", maxSplits: 1)
@@ -220,70 +244,59 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
         return (count, descs)
     }
 
-    private var sessPct = 0, weekPct = 0
-
-    // MARK: - Cleanup + Notifications + Name Cache
+    // MARK: - Cleanup + Notifications
 
     private func cleanupStaleFiles() {
         let fm = FileManager.default; let cd = "\(home)/.claude"
         let px = [".ctx_", ".state_", ".ctxlog_", ".tty_map_", ".tty_resolved_", ".name_tried_", ".activity_", ".files_", ".ctx_pct_"]
         let cutoff = Date().addingTimeInterval(-86400)
         guard let files = try? fm.contentsOfDirectory(atPath: cd) else { return }
-        for f in files { guard px.contains(where: { f.hasPrefix($0) }) else { continue }
-            if let a = try? fm.attributesOfItem(atPath: "\(cd)/\(f)"), let m = a[.modificationDate] as? Date, m < cutoff { try? fm.removeItem(atPath: "\(cd)/\(f)") } }
+        for f in files where px.contains(where: { f.hasPrefix($0) }) {
+            if let a = try? fm.attributesOfItem(atPath: "\(cd)/\(f)"), let m = a[.modificationDate] as? Date, m < cutoff { try? fm.removeItem(atPath: "\(cd)/\(f)") }
+        }
     }
 
     private func checkNotifications() {
         for s in sessions where !s.sid.isEmpty {
             let prev = prevStates[s.sid] ?? ""
             if notifyWaiting && prev == "active" && s.state == "waiting" {
-                let name = s.name.isEmpty ? s.project : s.name
-                sendNotification(title: name, body: "Ready for your input \u{2014} click to jump",
-                                 sound: notifySound ? "Tink" : nil, tty: s.tty)
+                sendNotification(title: s.name.isEmpty ? s.project : s.name, body: "Ready for input \u{2014} click to jump", sound: notifySound ? "Tink" : nil, tty: s.tty)
             }
             if notifyContext && s.contextPct >= 80 && !ctxWarned.contains(s.sid) {
                 ctxWarned.insert(s.sid)
-                let name = s.name.isEmpty ? s.project : s.name
-                sendNotification(title: "\(name) \u{2014} Context \(s.contextPct)%",
-                                 body: "Consider running /compact \u{2014} click to jump",
-                                 sound: notifySound ? "Submarine" : nil, tty: s.tty)
+                sendNotification(title: "\(s.name.isEmpty ? s.project : s.name) \u{2014} ctx \(s.contextPct)%", body: "Consider /compact \u{2014} click to jump", sound: notifySound ? "Submarine" : nil, tty: s.tty)
             }
             prevStates[s.sid] = s.state
         }
     }
 
     private func sendNotification(title: String, body: String, sound: String? = "Tink", tty: String = "") {
-        let n = NSUserNotification()
-        n.title = title
-        n.informativeText = body
-        if let soundName = sound { n.soundName = soundName }
-        // Store tty so we can jump to it when clicked
+        let n = NSUserNotification(); n.title = title; n.informativeText = body
+        if let sn = sound { n.soundName = sn }
         n.userInfo = ["tty": tty]
         NSUserNotificationCenter.default.deliver(n)
     }
 
-    // Clicking a notification jumps to the session's terminal tab
     func userNotificationCenter(_ center: NSUserNotificationCenter, didActivate notification: NSUserNotification) {
-        if let tty = notification.userInfo?["tty"] as? String, !tty.isEmpty {
-            jumpToSession(Session(pid: "", project: "", branch: "", dir: "", duration: "", tty: tty,
-                lastCommit: "", context: "", name: "", sid: "", modifiedFiles: 0, state: "",
-                contextPct: 0, smartContext: "", agentCount: 0, agentDescs: [], editedFiles: []))
-        }
+        if let tty = notification.userInfo?["tty"] as? String, !tty.isEmpty { jumpToSession(tty) }
     }
 
-    // Always show notifications even when app is frontmost
-    func userNotificationCenter(_ center: NSUserNotificationCenter, shouldPresent notification: NSUserNotification) -> Bool {
-        return true
-    }
+    func userNotificationCenter(_ center: NSUserNotificationCenter, shouldPresent notification: NSUserNotification) -> Bool { true }
+
+    // MARK: - Name Cache
 
     private func loadNameCache() {
         guard let data = try? String(contentsOfFile: "\(home)/.claude/.session_names", encoding: .utf8) else { return }
-        for line in data.split(separator: "\n") { let p = line.split(separator: "|", maxSplits: 1)
-            guard p.count == 2 else { continue }; nameCache[String(p[0])] = String(p[1]) }
+        for line in data.split(separator: "\n") {
+            let p = line.split(separator: "|", maxSplits: 1)
+            guard p.count == 2 else { continue }
+            nameCache[String(p[0])] = String(p[1])
+        }
     }
 
     private func saveNameToCache(_ sid: String, _ name: String) {
-        nameCache[sid] = name; let path = "\(home)/.claude/.session_names"; let line = "\(sid)|\(name)\n"
+        nameCache[sid] = name
+        let path = "\(home)/.claude/.session_names"; let line = "\(sid)|\(name)\n"
         if let fh = FileHandle(forWritingAtPath: path) { fh.seekToEndOfFile(); fh.write(line.data(using: .utf8) ?? Data()); fh.closeFile() }
         else { try? line.write(toFile: path, atomically: true, encoding: .utf8) }
     }
@@ -356,8 +369,9 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
                 if let data, let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let content = json["content"] as? [[String: Any]], let text = content.first?["text"] as? String {
                     result = text
-                    if let usage = json["usage"] as? [String: Any] { let inp = usage["input_tokens"] as? Int ?? 0; let out = usage["output_tokens"] as? Int ?? 0
-                        DispatchQueue.main.async { self?.haikuCallCount += 1; self?.haikuTokensUsed += inp + out } }
+                    if let usage = json["usage"] as? [String: Any] {
+                        DispatchQueue.main.async { self?.haikuCallCount += 1; self?.haikuTokensUsed += (usage["input_tokens"] as? Int ?? 0) + (usage["output_tokens"] as? Int ?? 0) }
+                    }
                 }
                 completion(result)
             }.resume()
@@ -418,12 +432,15 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
         do { try proc.run() } catch { return }; proc.waitUntilExit()
         let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
 
+        readUsage()
         let agentInfo = readAgentActivity()
         var result: [Session] = []
         for line in output.split(separator: "\n") where !line.isEmpty {
             let p = line.split(separator: "|", maxSplits: 10, omittingEmptySubsequences: false)
             guard p.count >= 5 else { continue }
             let sid = p.count > 8 ? String(p[8]) : ""
+            // Track when session first appeared (for per-session cost)
+            if !sid.isEmpty && sessionStartUsage[sid] == nil { sessionStartUsage[sid] = weekPct }
             result.append(Session(pid: String(p[0]).trimmingCharacters(in: .whitespaces),
                 project: (String(p[1]) as NSString).lastPathComponent, branch: p.count > 2 ? String(p[2]) : "",
                 dir: String(p[1]), duration: p.count > 3 ? fmtElapsed(String(p[3])) : "", tty: String(p[4]),
@@ -433,9 +450,10 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
                 state: p.count > 9 ? String(p[9]) : "",
                 contextPct: p.count > 10 ? Int(String(p[10]).trimmingCharacters(in: .whitespaces).split(separator: ".").first ?? "") ?? 0 : 0,
                 smartContext: smartCtxCache[sid] ?? "",
-                agentCount: agentInfo.count, agentDescs: agentInfo.descs, editedFiles: []))
+                agentCount: agentInfo.count, agentDescs: agentInfo.descs, editedFiles: [],
+                weeklyAtStart: sessionStartUsage[sid] ?? weekPct))
         }
-        sessions = result; resolveNames(); checkNotifications()
+        sessions = result; resolveNames(); checkNotifications(); renameTerminalTabs()
     }
 
     private func fmtElapsed(_ s: String) -> String {
@@ -458,155 +476,203 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
     // MARK: - Build Menu
 
     private func build() {
+        readUsage()
         let menu = NSMenu(); menu.autoenablesItems = false; menu.appearance = NSAppearance(named: .darkAqua)
         let n = sessions.count; let wc = sessions.filter { $0.state == "waiting" }.count
         let ts = (sessions.first { $0.state == "active" } ?? sessions.first)?.duration ?? ""
 
+        // ── Menu bar button: show usage% ──
         if let b = statusItem.button {
             let str = NSMutableAttributedString()
-            if n == 0 { str.append(a(" \u{25C6} ", sz: 13, wt: .bold, cl: .tertiaryLabelColor)) }
-            else {
+            if n == 0 {
+                str.append(a(" \u{25C6} ", sz: 13, wt: .bold, cl: .tertiaryLabelColor))
+            } else {
                 str.append(a(" \u{25C6} \(n)", sz: 13, wt: .bold, cl: .labelColor))
                 if wc > 0 { str.append(a(" \u{00B7} \(wc)\u{23F3}", sz: 11, wt: .medium, cl: waitingAmber)) }
-                if !ts.isEmpty { str.append(a(" \u{00B7} \(ts) ", sz: 11, wt: .medium, cl: NSColor(white: 0.55, alpha: 1))) }
+                if !ts.isEmpty { str.append(a(" \u{00B7} \(ts)", sz: 11, wt: .medium, cl: NSColor(white: 0.55, alpha: 1))) }
+            }
+            // Always show weekly % in menu bar
+            if weekPct > 0 {
+                let wkColor = weekPct >= 80 ? coral : weekPct >= 60 ? amber : NSColor(white: 0.55, alpha: 1)
+                str.append(a(" \u{00B7} \(weekPct)%w ", sz: 11, wt: .semibold, cl: wkColor))
+            } else {
+                str.append(a(" ", sz: 11, wt: .regular, cl: .clear))
             }
             b.attributedTitle = str
         }
 
+        // ── Empty state ──
         guard !sessions.isEmpty else {
-            txt("  No active sessions", sz: 13, wt: .medium, cl: .white, menu: menu)
-            footer(menu); statusItem.menu = menu; return
+            section("\u{25C7}  CLAUDE MONITOR", menu: menu)
+            txt("  No active sessions", sz: 12, wt: .medium, cl: dim, menu: menu)
+            menu.addItem(NSMenuItem.separator())
+            usageSection(menu)
+            footer(menu)
+            statusItem.menu = menu
+            return
         }
+
+        // ── Sessions ──
+        section("\u{25C6}  SESSIONS", menu: menu)
 
         let byDir = Dictionary(grouping: sessions, by: \.dir)
         for (_, group) in byDir.sorted(by: { $0.key < $1.key }) {
             let f = group[0]
+
+            // Project + branch
             let h = NSMutableAttributedString()
             h.append(a("  \(f.project) ", sz: 14, wt: .bold, cl: .white))
-            if !f.branch.isEmpty { h.append(a(f.branch, sz: 12, wt: .bold, cl: teal, mono: true)) }
+            if !f.branch.isEmpty { h.append(a(f.branch, sz: 11, wt: .bold, cl: teal, mono: true)) }
             item(h, menu: menu)
 
+            // Git info
+            if f.modifiedFiles > 0 || !f.lastCommit.isEmpty {
+                var info = f.modifiedFiles > 0 ? "  \(f.modifiedFiles) changed" : ""
+                if !f.lastCommit.isEmpty { info += info.isEmpty ? "  \(f.lastCommit)" : " \u{00B7} \(f.lastCommit)" }
+                txt(info, sz: 10, wt: .medium, cl: dimmer, menu: menu)
+            }
+
+            // Multi-session warning
             if group.count > 1 {
-                txt("  \u{26A0} \(group.count) sessions sharing one branch", sz: 12, wt: .bold, cl: amber, menu: menu)
+                txt("  \u{26A0} \(group.count) sessions sharing one branch", sz: 11, wt: .bold, cl: amber, menu: menu)
                 let si = NSMenuItem(title: "", action: #selector(splitBranches(_:)), keyEquivalent: "")
-                si.target = self; si.attributedTitle = a("  \u{2192} Split into separate branches", sz: 11, wt: .medium, cl: teal)
+                si.target = self; si.attributedTitle = a("  \u{2192} Split into branches", sz: 10, wt: .medium, cl: teal)
                 si.representedObject = group.map { ["name": $0.name.isEmpty ? $0.tty : $0.name, "dir": $0.dir, "branch": $0.branch, "tty": $0.tty] }
                 menu.addItem(si)
             }
 
-            if f.modifiedFiles > 0 || !f.lastCommit.isEmpty {
-                var info = f.modifiedFiles > 0 ? "  \(f.modifiedFiles) changed" : ""
-                if !f.lastCommit.isEmpty { info += info.isEmpty ? "  \(f.lastCommit)" : " \u{00B7} \(f.lastCommit)" }
-                txt(info, sz: 11, wt: .medium, cl: NSColor(white: 0.65, alpha: 1), menu: menu)
-            }
-
             menu.addItem(NSMenuItem.separator())
+
+            // Session rows
             for s in group { sessionRow(s, menu: menu) }
             menu.addItem(NSMenuItem.separator())
         }
 
-        usage(menu); footer(menu); statusItem.menu = menu    }
+        // ── Usage section ──
+        usageSection(menu)
+
+        // ── Footer ──
+        footer(menu)
+        statusItem.menu = menu
+    }
 
     private func sessionRow(_ s: Session, menu: NSMenu) {
         let dn = s.name.isEmpty ? (pendingNames.contains(s.sid) ? "Naming..." : "Session") : s.name
         let row = NSMutableAttributedString()
-        let (dot, dc): (String, NSColor) = s.state == "active" ? ("\u{25CF} ", activeGreen) : s.state == "waiting" ? ("\u{25CF} ", waitingAmber) : ("\u{25CB} ", NSColor(white: 0.45, alpha: 1))
+        let (dot, dc): (String, NSColor) = s.state == "active" ? ("\u{25CF} ", activeGreen) : s.state == "waiting" ? ("\u{25CF} ", waitingAmber) : ("\u{25CB} ", dim)
         row.append(a("  \(dot)", sz: 12, wt: .bold, cl: dc))
         row.append(a(dn, sz: 13, wt: .bold, cl: .white))
-        if s.agentCount > 0 { row.append(a(" +\(s.agentCount)", sz: 10, wt: .bold, cl: NSColor(red: 0.45, green: 0.6, blue: 0.9, alpha: 1))) }
-        row.append(a("  \(s.duration)", sz: 11, wt: .semibold, cl: NSColor(white: 0.5, alpha: 1), mono: true))
+        if s.agentCount > 0 { row.append(a(" +\(s.agentCount)", sz: 9, wt: .bold, cl: sectionLabel)) }
+        row.append(a("  \(s.duration)", sz: 11, wt: .semibold, cl: dim, mono: true))
         if s.contextPct > 0 {
-            let cc = s.contextPct >= 80 ? coral : s.contextPct >= 60 ? ctxWarn : NSColor(white: 0.45, alpha: 1)
+            let cc = s.contextPct >= 80 ? coral : s.contextPct >= 60 ? ctxWarn : dim
             row.append(a("  ctx \(s.contextPct)%", sz: 10, wt: .semibold, cl: cc, mono: true))
         }
+
+        // Per-session cost
+        let sessionCost = weekPct - s.weeklyAtStart
+        if sessionCost > 0 { row.append(a("  ~\(sessionCost)%w", sz: 9, wt: .medium, cl: dimmer, mono: true)) }
+
+        // Smart context line
         let ctx = !s.smartContext.isEmpty ? s.smartContext : !s.context.isEmpty ? s.context : s.state == "waiting" ? "Waiting for your input" : "Starting up..."
-        let ctxC: NSColor = s.smartContext.isEmpty ? NSColor(white: 0.55, alpha: 1) : NSColor(red: 0.55, green: 0.6, blue: 0.85, alpha: 1)
-        row.append(NSAttributedString(string: "\n", attributes: [.font: NSFont.systemFont(ofSize: 3)]))
-        row.append(a("     \(ctx)", sz: 12, wt: .medium, cl: ctxC))
+        let ctxC: NSColor = s.smartContext.isEmpty ? dim : NSColor(red: 0.55, green: 0.6, blue: 0.85, alpha: 1)
+        row.append(NSAttributedString(string: "\n", attributes: [.font: NSFont.systemFont(ofSize: 2)]))
+        row.append(a("     \(ctx)", sz: 11, wt: .medium, cl: ctxC))
 
         let mi = NSMenuItem(title: "", action: #selector(openTerm(_:)), keyEquivalent: "")
         mi.target = self; mi.representedObject = s.tty; mi.attributedTitle = row; mi.isEnabled = true; menu.addItem(mi)
 
+        // Send command option for waiting sessions
         if s.state == "waiting" || s.state.isEmpty {
             let wrap = NSMenuItem(title: "", action: #selector(wrapUpSession(_:)), keyEquivalent: "")
             wrap.target = self; wrap.representedObject = ["tty": s.tty, "name": dn]
-            wrap.attributedTitle = a("     \u{23FB} Send command...", sz: 11, wt: .medium, cl: NSColor(white: 0.50, alpha: 1))
+            wrap.attributedTitle = a("     \u{23FB} Send command...", sz: 10, wt: .medium, cl: dimmer)
             menu.addItem(wrap)
         }
     }
 
-    @objc private func wrapUpSession(_ sender: NSMenuItem) {
-        guard let info = sender.representedObject as? [String: String], let tty = info["tty"], !tty.isEmpty else { return }
-        let alert = NSAlert(); alert.messageText = "Send command to \"\(info["name"] ?? "session")\""
-        alert.informativeText = "Type a message or command:"; alert.addButton(withTitle: "Send"); alert.addButton(withTitle: "Cancel")
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24)); field.placeholderString = "/compact, /done, or custom"
-        alert.accessoryView = field; NSApp.activate(ignoringOtherApps: true)
-        if alert.runModal() == .alertFirstButtonReturn && !field.stringValue.isEmpty { typeInTerminal(tty: tty, text: field.stringValue) }
-    }
+    // MARK: - Usage Section
 
-    @objc private func openTerm(_ sender: NSMenuItem) {
-        guard let tty = sender.representedObject as? String, !tty.isEmpty else { return }
-        jumpToSession(Session(pid: "", project: "", branch: "", dir: "", duration: "", tty: tty, lastCommit: "", context: "", name: "", sid: "", modifiedFiles: 0, state: "", contextPct: 0, smartContext: "", agentCount: 0, agentDescs: [], editedFiles: []))
-    }
+    private func usageSection(_ menu: NSMenu) {
+        section("\u{2261}  USAGE", menu: menu)
 
-    @objc private func splitBranches(_ sender: NSMenuItem) {
-        guard let infos = sender.representedObject as? [[String: String]], infos.count > 1, let dir = infos.first?["dir"], let bb = infos.first?["branch"], !bb.isEmpty else { return }
-        var cmds = ["# Branch split commands:\n"]; var created: [String] = []
-        for (i, info) in infos.enumerated() {
-            let raw = info["name"] ?? "session-\(i)"
-            let slug = String(raw.lowercased().replacingOccurrences(of: " ", with: "-").filter { $0.isLetter || $0.isNumber || $0 == "-" }.prefix(30))
-            let branch = "\(bb)-\(slug)"
-            if i == 0 { cmds += ["# \(raw): stays on \(bb)\n"]; continue }
-            let proc = Process(); proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-            proc.arguments = ["-C", dir, "branch", branch, bb]; proc.standardOutput = FileHandle.nullDevice; proc.standardError = FileHandle.nullDevice
-            try? proc.run(); proc.waitUntilExit(); created.append(branch); cmds += ["git checkout \(branch)"]
+        // Session bar
+        usageBar("Session", pct: sessPct, reset: sessResetStr, menu: menu)
+
+        // Weekly bar
+        usageBar("Weekly ", pct: weekPct, reset: weekResetStr, menu: menu)
+
+        // Model breakdown
+        if opusPct > 0 || sonnetPct > 0 {
+            let r = NSMutableAttributedString()
+            r.append(a("  ", sz: 10, wt: .regular, cl: .clear))
+            if opusPct > 0 {
+                let opC = opusPct >= 80 ? coral : opusPct >= 50 ? amber : green
+                r.append(a("Opus ", sz: 10, wt: .semibold, cl: dim, mono: true))
+                r.append(a("\(opusPct)%", sz: 10, wt: .bold, cl: opC, mono: true))
+            }
+            if opusPct > 0 && sonnetPct > 0 { r.append(a("  \u{00B7}  ", sz: 10, wt: .regular, cl: dimmer)) }
+            if sonnetPct > 0 {
+                let snC = sonnetPct >= 80 ? coral : sonnetPct >= 50 ? amber : green
+                r.append(a("Sonnet ", sz: 10, wt: .semibold, cl: dim, mono: true))
+                r.append(a("\(sonnetPct)%", sz: 10, wt: .bold, cl: snC, mono: true))
+            }
+            item(r, menu: menu)
         }
-        NSPasteboard.general.clearContents(); NSPasteboard.general.setString(cmds.joined(separator: "\n"), forType: .string)
-        sendNotification(title: "Branches Split", body: "Created \(created.count) branches. Commands copied.", sound: "Glass")
-    }
 
-    // MARK: - Usage + Footer
+        // Velocity + ETA
+        section("\u{25B8}  PACE", menu: menu)
 
-    private func usage(_ menu: NSMenu) {
-        guard let data = FileManager.default.contents(atPath: "\(home)/.claude/.usage_cache.json"),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            txt("  Usage unavailable", sz: 11, wt: .regular, cl: NSColor(white: 0.5, alpha: 1), menu: menu); return }
-        let fh = json["five_hour"] as? [String: Any]; let sd = json["seven_day"] as? [String: Any]
-        let wp = Int(sd?["utilization"] as? Double ?? 0)
-        bar("Session", pct: Int(fh?["utilization"] as? Double ?? 0), reset: fmtReset(fh?["resets_at"] as? String), menu: menu)
-        bar("Weekly ", pct: wp, reset: fmtDay(sd?["resets_at"] as? String), menu: menu)
+        if let vel = velocityTracker.velocityPerHour(current: weekPct), vel > 0 {
+            let velStr = String(format: "  %.1f%%/hr", vel)
+            let r = NSMutableAttributedString()
+            r.append(a(velStr, sz: 11, wt: .bold, cl: vel > 8 ? coral : vel > 4 ? amber : green, mono: true))
 
-        // Model breakdown in menu too
-        var modelLine = "  "
-        if let opus = json["seven_day_opus"] as? [String: Any], let u = opus["utilization"] as? Double, u > 0 { modelLine += "Opus \(Int(u))%" }
-        if let sonnet = json["seven_day_sonnet"] as? [String: Any], let u = sonnet["utilization"] as? Double, u > 0 {
-            modelLine += modelLine.count > 2 ? "  \u{00B7}  " : ""; modelLine += "Sonnet \(Int(u))%" }
-        if modelLine.count > 2 { txt(modelLine, sz: 10, wt: .medium, cl: NSColor(white: 0.4, alpha: 1), menu: menu) }
+            if let eta80 = velocityTracker.etaMinutes(current: weekPct, target: 80), weekPct < 80 {
+                let etaStr: String
+                let etaColor: NSColor
+                if eta80 < 60 { etaStr = " \u{2192} 80% in <1h"; etaColor = coral }
+                else if eta80 < 120 { etaStr = " \u{2192} 80% in ~\(eta80/60)h\(eta80%60)m"; etaColor = amber }
+                else { etaStr = " \u{2192} 80% in ~\(eta80/60)h\(eta80%60)m"; etaColor = green }
+                r.append(a(etaStr, sz: 10, wt: .semibold, cl: etaColor, mono: true))
+            } else if weekPct >= 80 {
+                r.append(a(" \u{2192} over 80% \u{26A0}", sz: 10, wt: .bold, cl: coral, mono: true))
+            }
+            item(r, menu: menu)
+        } else {
+            txt("  Collecting data...", sz: 10, wt: .medium, cl: dimmer, menu: menu)
+        }
 
-        var infoLine = ""
+        // Budget advisor
+        if let budget = dailyBudget() {
+            txt("  Budget: \(budget)", sz: 10, wt: .medium, cl: dim, menu: menu)
+        }
+
+        // Today's usage
         if let startStr = try? String(contentsOfFile: "\(home)/.claude/.weekly_start_pct", encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
-           let sp = Int(startStr) { let d = wp - sp; if d > 0 { infoLine += "+\(d)% today" } }
-        if let vel = velocityTracker.velocityPerHour(current: wp) {
-            infoLine += infoLine.isEmpty ? "" : "  \u{00B7}  "; infoLine += String(format: "%.1f%%/hr", vel) }
-        if enableHaiku && haikuCallCount > 0 {
-            let sep = infoLine.isEmpty ? "" : "  \u{00B7}  "
-            infoLine += "\(sep)Monitor: \(haikuCallCount) calls" }
-        if !infoLine.isEmpty { txt("  \(infoLine)", sz: 10, wt: .medium, cl: NSColor(white: 0.45, alpha: 1), menu: menu) }
+           let sp = Int(startStr) {
+            let delta = weekPct - sp
+            if delta > 0 { txt("  Today: +\(delta)% weekly", sz: 10, wt: .medium, cl: dim, menu: menu) }
+        }
+
+        menu.addItem(NSMenuItem.separator())
     }
 
-    private func bar(_ label: String, pct: Int, reset: String?, menu: NSMenu) {
-        let bc = pct >= 80 ? coral : pct >= 50 ? amber : green; let f = min(pct * 16 / 100, 16)
-        let b = String(repeating: "\u{2588}", count: f) + String(repeating: "\u{2591}", count: 16 - f)
+    private func usageBar(_ label: String, pct: Int, reset: String, menu: NSMenu) {
+        let bc = pct >= 80 ? coral : pct >= 50 ? amber : green
+        let f = min(pct * 16 / 100, 16)
+        let bar = String(repeating: "\u{2588}", count: f) + String(repeating: "\u{2591}", count: 16 - f)
         let r = NSMutableAttributedString()
-        r.append(a("  \(label) ", sz: 11, wt: .semibold, cl: NSColor(white: 0.6, alpha: 1), mono: true))
-        r.append(a(b, sz: 11, wt: .regular, cl: bc, mono: true)); r.append(a(" \(pct)%", sz: 11, wt: .bold, cl: bc, mono: true))
-        if let rs = reset { r.append(a("  \u{21BB} \(rs)", sz: 10, wt: .medium, cl: NSColor(white: 0.5, alpha: 1), mono: true)) }
+        r.append(a("  \(label) ", sz: 11, wt: .semibold, cl: dim, mono: true))
+        r.append(a(bar, sz: 11, wt: .regular, cl: bc, mono: true))
+        r.append(a(" \(pct)%", sz: 11, wt: .bold, cl: bc, mono: true))
+        if !reset.isEmpty { r.append(a("  \u{21BB} \(reset)", sz: 9, wt: .medium, cl: dimmer, mono: true)) }
         item(r, menu: menu)
     }
 
-    private func footer(_ menu: NSMenu) {
-        menu.addItem(NSMenuItem.separator())
+    // MARK: - Footer
 
+    private func footer(_ menu: NSMenu) {
         // Bulk compact
         let wc = sessions.filter { $0.state == "waiting" }.count
         if wc > 0 {
@@ -618,22 +684,33 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
         // Export
         if !sessions.isEmpty {
             let ex = NSMenuItem(title: "", action: #selector(exportAction), keyEquivalent: "e")
-            ex.target = self; ex.attributedTitle = a("  Export session summary", sz: 12, wt: .medium, cl: NSColor(white: 0.6, alpha: 1))
+            ex.target = self; ex.attributedTitle = a("  Export summary", sz: 11, wt: .medium, cl: dim)
             menu.addItem(ex)
         }
 
+        menu.addItem(NSMenuItem.separator())
+
         let r = NSMenuItem(title: "Refresh", action: #selector(refresh), keyEquivalent: "r"); r.target = self; menu.addItem(r)
 
+        // Settings submenu
         let sm = NSMenu()
         addToggle(sm, "Waiting Alerts", notifyWaiting, #selector(toggleWaiting))
         addToggle(sm, "Context Warnings", notifyContext, #selector(toggleContext))
         addToggle(sm, "Notification Sounds", notifySound, #selector(toggleSound))
         addToggle(sm, "AI Names + Smart Context", enableHaiku, #selector(toggleHaiku))
+        addToggle(sm, "Rename Terminal Tabs", renameTerminals, #selector(toggleRename))
         sm.addItem(NSMenuItem.separator())
-        let isInstalled = FileManager.default.fileExists(atPath: "\(home)/Library/LaunchAgents/com.claude.monitor.plist")
-        addToggle(sm, "Launch at Login", isInstalled, #selector(toggleAutoLaunch))
+        addToggle(sm, "Launch at Login", FileManager.default.fileExists(atPath: "\(home)/Library/LaunchAgents/com.claude.monitor.plist"), #selector(toggleAutoLaunch))
         let si = NSMenuItem(title: "Settings", action: nil, keyEquivalent: ""); si.submenu = sm; menu.addItem(si)
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+    }
+
+    // MARK: - Menu helpers
+
+    private func section(_ title: String, menu: NSMenu) {
+        let r = NSMutableAttributedString()
+        r.append(a("  \(title)", sz: 10, wt: .bold, cl: sectionLabel))
+        item(r, menu: menu)
     }
 
     private func addToggle(_ menu: NSMenu, _ label: String, _ on: Bool, _ sel: Selector) {
@@ -641,12 +718,45 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
         i.target = self; menu.addItem(i)
     }
 
+    // MARK: - Actions
+
     @objc private func compactAllAction() { compactAllWaiting() }
     @objc private func exportAction() { exportSummary() }
     @objc private func toggleWaiting() { notifyWaiting.toggle(); build() }
     @objc private func toggleContext() { notifyContext.toggle(); build() }
     @objc private func toggleSound() { notifySound.toggle(); build() }
     @objc private func toggleHaiku() { enableHaiku.toggle(); build() }
+    @objc private func toggleRename() { renameTerminals.toggle(); build() }
+
+    @objc private func openTerm(_ sender: NSMenuItem) {
+        guard let tty = sender.representedObject as? String, !tty.isEmpty else { return }
+        jumpToSession(tty)
+    }
+
+    @objc private func wrapUpSession(_ sender: NSMenuItem) {
+        guard let info = sender.representedObject as? [String: String], let tty = info["tty"], !tty.isEmpty else { return }
+        let alert = NSAlert(); alert.messageText = "Send command to \"\(info["name"] ?? "session")\""
+        alert.informativeText = "Type a command to send:"; alert.addButton(withTitle: "Send"); alert.addButton(withTitle: "Cancel")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24)); field.placeholderString = "/compact, /done, or custom"
+        alert.accessoryView = field; NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn && !field.stringValue.isEmpty { typeInTerminal(tty: tty, text: field.stringValue) }
+    }
+
+    @objc private func splitBranches(_ sender: NSMenuItem) {
+        guard let infos = sender.representedObject as? [[String: String]], infos.count > 1, let dir = infos.first?["dir"], let bb = infos.first?["branch"], !bb.isEmpty else { return }
+        var cmds: [String] = []; var created: [String] = []
+        for (i, info) in infos.enumerated() {
+            let raw = info["name"] ?? "session-\(i)"
+            let slug = String(raw.lowercased().replacingOccurrences(of: " ", with: "-").filter { $0.isLetter || $0.isNumber || $0 == "-" }.prefix(30))
+            if i == 0 { continue }
+            let branch = "\(bb)-\(slug)"
+            let proc = Process(); proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            proc.arguments = ["-C", dir, "branch", branch, bb]; proc.standardOutput = FileHandle.nullDevice; proc.standardError = FileHandle.nullDevice
+            try? proc.run(); proc.waitUntilExit(); created.append(branch); cmds.append("git checkout \(branch)")
+        }
+        NSPasteboard.general.clearContents(); NSPasteboard.general.setString(cmds.joined(separator: "\n"), forType: .string)
+        sendNotification(title: "Branches Split", body: "Created \(created.count) branches. Commands copied.", sound: "Glass")
+    }
 
     @objc private func toggleAutoLaunch() {
         let pp = "\(home)/Library/LaunchAgents/com.claude.monitor.plist"; let fm = FileManager.default
@@ -665,19 +775,24 @@ class Monitor: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate
         build()
     }
 
+    // MARK: - Helpers
+
     private func a(_ s: String, sz: CGFloat, wt: NSFont.Weight, cl: NSColor, mono: Bool = false) -> NSAttributedString {
         NSAttributedString(string: s, attributes: [.font: mono ? NSFont.monospacedSystemFont(ofSize: sz, weight: wt) : NSFont.systemFont(ofSize: sz, weight: wt), .foregroundColor: cl])
     }
     private func txt(_ s: String, sz: CGFloat, wt: NSFont.Weight, cl: NSColor, menu: NSMenu) { item(a(s, sz: sz, wt: wt, cl: cl), menu: menu) }
     private func item(_ attr: NSAttributedString, menu: NSMenu) {
-        let i = NSMenuItem(title: "", action: nil, keyEquivalent: ""); i.attributedTitle = attr; i.isEnabled = false; menu.addItem(i) }
+        let i = NSMenuItem(title: "", action: nil, keyEquivalent: ""); i.attributedTitle = attr; i.isEnabled = false; menu.addItem(i)
+    }
     private func fmtReset(_ s: String?) -> String? {
         guard let s, let d = iso(s) else { return nil }; let r = d.timeIntervalSinceNow; guard r > 0 else { return nil }
-        return "\(Int(r)/3600)h\((Int(r)%3600)/60)m" }
+        return "\(Int(r)/3600)h\((Int(r)%3600)/60)m"
+    }
     private func fmtDay(_ s: String?) -> String? { guard let s, let d = iso(s) else { return nil }; let f = DateFormatter(); f.dateFormat = "EEE HH:mm"; return f.string(from: d) }
     private func iso(_ s: String) -> Date? {
         let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return f.date(from: s) ?? { f.formatOptions = [.withInternetDateTime]; return f.date(from: s) }() }
+        return f.date(from: s) ?? { f.formatOptions = [.withInternetDateTime]; return f.date(from: s) }()
+    }
     @objc private func refresh() { scan(); build() }
 }
 
