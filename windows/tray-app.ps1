@@ -7,10 +7,13 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 # -- Single instance guard ----------------------------------
-$script:Mutex = New-Object System.Threading.Mutex($false, "Global\ClaudeMonitorTrayApp")
-if (-not $script:Mutex.WaitOne(0, $false)) {
-    # Another instance is already running -- exit silently
-    exit 0
+try {
+    $script:Mutex = New-Object System.Threading.Mutex($false, "Local\ClaudeMonitorTrayApp")
+    if (-not $script:Mutex.WaitOne(0, $false)) {
+        exit 0  # Another instance already running
+    }
+} catch {
+    # Mutex creation failed -- proceed anyway (better than not starting)
 }
 
 $script:ClaudeDir = Join-Path $env:USERPROFILE ".claude"
